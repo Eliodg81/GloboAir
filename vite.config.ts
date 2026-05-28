@@ -14,15 +14,15 @@ export default defineConfig({
     chunkSizeWarningLimit: 600,
     rollupOptions: {
       output: {
+        // Nomi fissi senza hash — così i file in git non cambiano ad ogni build
+        entryFileNames: 'assets/[name].js',
+        chunkFileNames: 'assets/[name].js',
+        assetFileNames: 'assets/[name].[ext]',
         manualChunks: {
-          // Separa React dal codice app
-          'react-vendor': ['react', 'react-dom'],
-          // Separa le icone Lucide (sono pesanti)
-          'lucide': ['lucide-react'],
-          // Separa il layer BLE di Capacitor
+          'react-vendor':  ['react', 'react-dom'],
+          'lucide':        ['lucide-react'],
           'capacitor-ble': ['@capacitor-community/bluetooth-le'],
-          // Separa il core Capacitor
-          'capacitor-core': ['@capacitor/core'],
+          'capacitor-core':['@capacitor/core'],
         },
       },
     },
