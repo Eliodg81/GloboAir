@@ -9,7 +9,7 @@ export default function App() {
   const [mode, setMode] = useState<AppMode>('select');
 
   return (
-    <div className="h-full w-full flex flex-col bg-[#0a0a0a] safe-top safe-bottom">
+    <div className="h-full w-full flex flex-col bg-[#0a0a0a] safe-top safe-bottom overflow-hidden">
       {mode === 'select'    && <ModeSelect onSelect={setMode} />}
       {mode === 'broadcast' && <BroadcasterView onBack={() => setMode('select')} />}
       {mode === 'receive'   && <ReceiverView    onBack={() => setMode('select')} />}

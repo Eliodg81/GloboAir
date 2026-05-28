@@ -5,7 +5,7 @@ interface Props { onSelect: (mode: AppMode) => void; }
 
 export default function ModeSelect({ onSelect }: Props) {
   return (
-    <div className="flex-1 flex flex-col items-center justify-center px-8 gap-8">
+    <div className="flex-1 min-h-0 flex flex-col items-center justify-center px-8 gap-8 overflow-y-auto">
       {/* Logo */}
       <div className="text-center mb-4">
         <h1 className="text-4xl font-bold tracking-tight text-white">GloboAir</h1>

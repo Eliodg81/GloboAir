@@ -227,7 +227,7 @@ export default function BroadcasterView({ onBack }: Props) {
         <h2 className="ml-3 text-base font-semibold text-white">Modalità Broadcast</h2>
       </div>
 
-      <div className="flex-1 flex flex-col items-center justify-between px-6 py-4 gap-4 overflow-y-auto">
+      <div className="flex-1 min-h-0 flex flex-col items-center justify-between px-6 py-4 gap-4 overflow-y-auto">
 
         {/* Language selector */}
         <div className="w-full max-w-xs relative">
