@@ -55,7 +55,9 @@ export default function BroadcasterView({ onBack }: Props) {
     broadcaster: BLEBroadcaster
   ) => {
     setLiveText(text);
-    if (!isFinal && text.length < 40) return;
+    // Invia via BLE solo risultati finali con almeno 2 parole o 8 caratteri
+    if (!isFinal) return;
+    if (text.length < 8 || text.split(' ').length < 2) return;
 
     try {
       const useTranslation = mode === 'openai' || mode === 'realtime';

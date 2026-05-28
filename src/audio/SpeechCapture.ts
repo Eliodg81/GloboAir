@@ -43,9 +43,18 @@ export class SpeechCapture {
       for (let i = event.resultIndex; i < event.results.length; i++) {
         const result = event.results[i];
         const text = result[0].transcript.trim();
-        if (text.length > 0) {
-          this.onTranscript(text, result.isFinal);
-        }
+        const confidence: number = result[0].confidence ?? 1.0;
+
+        // Ignora risultati troppo corti (rumori, sillabe isolate)
+        if (text.length < 3) continue;
+
+        // Ignora risultati finali con confidence troppo bassa (rumori riconosciuti male)
+        if (result.isFinal && confidence < 0.4) continue;
+
+        // Ignora risultati finali di una sola parola brevissima (< 4 caratteri)
+        if (result.isFinal && text.split(' ').length === 1 && text.length < 4) continue;
+
+        this.onTranscript(text, result.isFinal);
       }
     };
 
