@@ -1,7 +1,8 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { ArrowLeft, Headphones, Search, Wifi, Volume2, X, Radio } from 'lucide-react';
+import { ArrowLeft, Headphones, Search, Wifi, Volume2, X, Radio, Languages } from 'lucide-react';
 import { BLEReceiver, BroadcastSession } from '../ble/BLEReceiver';
-import { AudioPlayer } from '../audio/AudioPlayer';
+import { TranslationEngine } from '../audio/TranslationEngine';
+import { SpeechPlayer } from '../audio/SpeechPlayer';
 import LanguagePicker from './LanguagePicker';
 
 interface Props { onBack: () => void; }
@@ -12,13 +13,26 @@ export default function ReceiverView({ onBack }: Props) {
   const [viewState, setViewState] = useState<ViewState>('idle');
   const [sessions, setSessions] = useState<BroadcastSession[]>([]);
   const [framesReceived, setFramesReceived] = useState(0);
-  const [bufferSize, setBufferSize] = useState(0);
   const [error, setError] = useState('');
-  const [targetLang, setTargetLang] = useState('en'); // lingua in cui voglio ascoltare
+  const [targetLang, setTargetLang] = useState('en');
 
-  const receiverRef = useRef<BLEReceiver | null>(null);
-  const playerRef = useRef<AudioPlayer | null>(null);
-  const statsInterval = useRef<ReturnType<typeof setInterval> | null>(null);
+  // Testo live: originale e tradotto
+  const [originalText, setOriginalText] = useState('');
+  const [translatedText, setTranslatedText] = useState('');
+
+  const receiverRef    = useRef<BLEReceiver | null>(null);
+  const translatorRef  = useRef<TranslationEngine | null>(null);
+  const playerRef      = useRef<SpeechPlayer | null>(null);
+  const targetLangRef  = useRef(targetLang);
+
+  // Mantieni ref aggiornata per uso nei callback BLE (chiusura stabile)
+  useEffect(() => { targetLangRef.current = targetLang; }, [targetLang]);
+
+  // Aggiorna translator e player quando cambia la lingua target
+  useEffect(() => {
+    translatorRef.current?.update('__src__', targetLang); // src aggiornato nel callback
+    playerRef.current?.updateTargetLang(targetLang);
+  }, [targetLang]);
 
   const startScan = useCallback(async () => {
     setViewState('scanning');
@@ -32,15 +46,40 @@ export default function ReceiverView({ onBack }: Props) {
       receiver.onStateChange = (s) => {
         if (s === 'error') setViewState('error');
         if (s === 'connected') setViewState('listening');
+        if (s === 'idle') setViewState('idle');
       };
       receiver.onSessionFound = (session) => {
         setSessions(prev =>
           prev.find(s => s.device.deviceId === session.device.deviceId) ? prev : [...prev, session]
         );
       };
-      receiver.onFrame = (encoded) => {
-        playerRef.current?.receiveFrame(encoded);
+
+      // ── v0.2: pipeline testo → traduzione → TTS ──
+      receiver.onText = async (text, isFinal) => {
         setFramesReceived(r => r + 1);
+
+        // Mostra il testo originale (parziale o finale)
+        setOriginalText(text);
+
+        if (!isFinal) return; // per i risultati parziali mostriamo solo il testo grezzo
+
+        try {
+          const engine = translatorRef.current;
+          if (!engine) return;
+          const translated = await engine.translate(text);
+          setTranslatedText(translated);
+
+          // Leggi ad alta voce solo le frasi finali
+          playerRef.current?.speak(translated);
+
+          // Reset dopo un po'
+          setTimeout(() => {
+            setOriginalText('');
+            setTranslatedText('');
+          }, 3000);
+        } catch (e) {
+          console.warn('[ReceiverView] translate/speak error:', e);
+        }
       };
 
       await receiver.startScan();
@@ -53,13 +92,13 @@ export default function ReceiverView({ onBack }: Props) {
   const connect = useCallback(async (session: BroadcastSession) => {
     setViewState('connecting');
     try {
-      const player = new AudioPlayer();
-      player.start();
-      playerRef.current = player;
+      // Crea TranslationEngine (source lang unknown at connect time — aggiornato dinamicamente)
+      translatorRef.current = new TranslationEngine('it', targetLangRef.current);
+      // Crea SpeechPlayer
+      playerRef.current = new SpeechPlayer(targetLangRef.current);
+
       await receiverRef.current?.connect(session);
-      statsInterval.current = setInterval(() => {
-        setBufferSize(playerRef.current?.bufferSize ?? 0);
-      }, 500);
+      // onStateChange → 'connected' → setViewState('listening')
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Connessione fallita');
       setViewState('error');
@@ -67,21 +106,23 @@ export default function ReceiverView({ onBack }: Props) {
   }, []);
 
   const stopAll = useCallback(async () => {
-    if (statsInterval.current) clearInterval(statsInterval.current);
     playerRef.current?.stop();
+    translatorRef.current?.destroy();
     await receiverRef.current?.disconnect();
     receiverRef.current = null;
+    translatorRef.current = null;
     playerRef.current = null;
     setSessions([]);
     setFramesReceived(0);
-    setBufferSize(0);
+    setOriginalText('');
+    setTranslatedText('');
     setViewState('idle');
   }, []);
 
   useEffect(() => {
     return () => {
-      if (statsInterval.current) clearInterval(statsInterval.current);
       playerRef.current?.stop();
+      translatorRef.current?.destroy();
       receiverRef.current?.disconnect().catch(() => {});
     };
   }, []);
@@ -106,7 +147,7 @@ export default function ReceiverView({ onBack }: Props) {
 
       <div className="flex-1 flex flex-col items-center justify-between px-6 py-4">
 
-        {/* Language selector — sempre visibile (bloccata quando in ascolto) */}
+        {/* Language selector */}
         <div className="w-full max-w-xs relative">
           <LanguagePicker
             label="Voglio ascoltare in"
@@ -181,14 +222,38 @@ export default function ReceiverView({ onBack }: Props) {
                   <Volume2 className="w-10 h-10 text-white" />
                 </div>
               </div>
+
               <div className="text-center">
                 <p className="text-blue-400 font-semibold text-lg">In ascolto</p>
-                <p className="text-gray-500 text-sm mt-0.5">Audio tradotto in arrivo</p>
+                <p className="text-gray-500 text-sm mt-0.5">Traduzione automatica attiva</p>
               </div>
-              <div className="w-full flex gap-3">
-                <StatCard label="Frame ricevuti" value={framesReceived.toString()} />
-                <StatCard label="Buffer" value={`${bufferSize}f`} />
-              </div>
+
+              {/* Live translation display */}
+              {(originalText || translatedText) && (
+                <div className="w-full flex flex-col gap-2">
+                  {/* Testo originale (guida) */}
+                  {originalText && (
+                    <div className="bg-[#111] border border-[#2a2a2a] rounded-2xl px-4 py-3">
+                      <p className="text-[10px] text-gray-600 uppercase tracking-widest mb-1">Originale</p>
+                      <p className="text-gray-400 text-sm leading-relaxed">{originalText}</p>
+                    </div>
+                  )}
+                  {/* Testo tradotto */}
+                  {translatedText && (
+                    <div className="bg-blue-500/10 border border-blue-500/30 rounded-2xl px-4 py-3
+                                    flex items-start gap-2">
+                      <Languages className="w-4 h-4 text-blue-400 mt-0.5 shrink-0" />
+                      <div>
+                        <p className="text-[10px] text-blue-400/70 uppercase tracking-widest mb-1">Traduzione</p>
+                        <p className="text-white text-sm font-medium leading-relaxed">{translatedText}</p>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              <StatCard label="Frasi ricevute" value={framesReceived.toString()} />
+
               <button onClick={stopAll}
                 className="px-6 py-3 rounded-full border border-[#2a2a2a] text-gray-400
                            hover:text-white hover:border-gray-500 transition-colors text-sm">
@@ -200,7 +265,7 @@ export default function ReceiverView({ onBack }: Props) {
           {/* ERROR */}
           {viewState === 'error' && (
             <>
-              <p className="text-red-400">{error}</p>
+              <p className="text-red-400 text-center">{error}</p>
               <button onClick={() => setViewState('idle')}
                 className="px-6 py-3 rounded-full bg-[#1a1a1a] text-gray-300 text-sm">
                 Riprova
@@ -211,7 +276,9 @@ export default function ReceiverView({ onBack }: Props) {
 
         {/* Footer */}
         <p className="text-xs text-gray-700 text-center">
-          {isListening ? 'Tieni lo schermo acceso durante l\'ascolto' : 'Solo Bluetooth · Nessun internet'}
+          {isListening
+            ? 'Tieni lo schermo acceso · Traduzione via internet'
+            : 'Solo Bluetooth · Traduzione via internet'}
         </p>
       </div>
     </div>
@@ -240,7 +307,7 @@ function SessionCard({ session, onConnect }: { session: BroadcastSession; onConn
 
 function StatCard({ label, value }: { label: string; value: string }) {
   return (
-    <div className="flex-1 bg-[#1a1a1a] rounded-2xl p-4">
+    <div className="w-full bg-[#1a1a1a] rounded-2xl p-4">
       <p className="text-gray-500 text-xs">{label}</p>
       <p className="text-white text-xl font-bold mt-1">{value}</p>
     </div>

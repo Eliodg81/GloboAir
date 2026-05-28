@@ -16,6 +16,7 @@ import {
   encodeChunk,
   MAX_CHUNK_DATA,
   FLAG_FIRST_FRAME,
+  encodeTextFrame,
 } from './protocol';
 
 // ─── Plugin nativo (Swift iOS / Kotlin Android) ───────────────────────────────
@@ -116,6 +117,25 @@ export class BLEBroadcaster {
 
     // 16-bit rollover
     this.frameId = (this.frameId + 1) & 0xFFFF;
+  }
+
+  /**
+   * v0.2 — Invia una frase trascritta a tutti i receiver connessi.
+   * @param text     testo trascritto (UTF-8, max ~500 bytes)
+   * @param isFinal  true = frase completa, false = risultato parziale
+   */
+  async sendText(text: string, isFinal: boolean): Promise<void> {
+    if (!this.isActive || this.connectedCount === 0) return;
+
+    const frame = encodeTextFrame({ seqId: this.frameId, isFinal, text });
+    this.frameId = (this.frameId + 1) & 0xFFFF;
+
+    const b64 = uint8ToBase64(frame);
+    await BLEPeripheral.sendNotification({
+      serviceUuid: GLOBOAIR_SERVICE_UUID,
+      characteristicUuid: AUDIO_CHARACTERISTIC_UUID, // stesso canale, flag TEXT discrimina
+      value: b64,
+    });
   }
 
   destroy(): void {

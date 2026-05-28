@@ -13,7 +13,10 @@ import {
   GLOBOAIR_SERVICE_UUID,
   AUDIO_CHARACTERISTIC_UUID,
   decodeChunk,
+  decodeTextFrame,
   FrameReassembler,
+  FLAG_TEXT,
+  TEXT_FRAME_HEADER_SIZE,
 } from './protocol';
 
 export type ReceiverState =
@@ -37,6 +40,8 @@ export class BLEReceiver {
   public onStateChange?: (state: ReceiverState) => void;
   public onSessionFound?: (session: BroadcastSession) => void;
   public onFrame?: (encoded: Uint8Array) => void;
+  /** v0.2 — chiamato quando arriva una frase trascritta dal broadcaster */
+  public onText?: (text: string, isFinal: boolean) => void;
   public framesReceived = 0;
 
   constructor() {
@@ -106,8 +111,17 @@ export class BLEReceiver {
         (value: DataView) => {
           try {
             const raw = new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
-            const chunk = decodeChunk(raw);
-            this.reassembler.receive(chunk);
+
+            // v0.2: discrimina frame testo vs frame audio tramite FLAG_TEXT
+            if (raw.length >= TEXT_FRAME_HEADER_SIZE && (raw[2] & FLAG_TEXT) !== 0) {
+              const tf = decodeTextFrame(raw);
+              this.framesReceived++;
+              this.onText?.(tf.text, tf.isFinal);
+            } else {
+              // v0.1 audio fallback (ADPCM)
+              const chunk = decodeChunk(raw);
+              this.reassembler.receive(chunk);
+            }
           } catch (err) {
             console.warn('[BLEReceiver] decode error:', err);
           }

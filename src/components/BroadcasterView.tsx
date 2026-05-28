@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { ArrowLeft, Radio, Square, Users } from 'lucide-react';
+import { ArrowLeft, Radio, Square, Users, Mic } from 'lucide-react';
 import { BLEBroadcaster } from '../ble/BLEBroadcaster';
-import { AudioCapture } from '../audio/AudioCapture';
+import { SpeechCapture } from '../audio/SpeechCapture';
 import LanguagePicker from './LanguagePicker';
 
 interface Props { onBack: () => void; }
@@ -13,29 +13,48 @@ export default function BroadcasterView({ onBack }: Props) {
   const [listeners, setListeners] = useState(0);
   const [framesSent, setFramesSent] = useState(0);
   const [error, setError] = useState('');
-  const [sourceLang, setSourceLang] = useState('it'); // lingua in cui parla il broadcaster
+  const [sourceLang, setSourceLang] = useState('it');
+  const [liveText, setLiveText] = useState('');      // trascrizione in tempo reale
 
   const broadcasterRef = useRef<BLEBroadcaster | null>(null);
-  const captureRef = useRef<AudioCapture | null>(null);
+  const captureRef    = useRef<SpeechCapture | null>(null);
+  const sentRef       = useRef(0);
 
   const isLive = state === 'live';
 
   const start = useCallback(async () => {
     setState('starting');
     setError('');
+    sentRef.current = 0;
+
     try {
+      // 1. Inizializza BLE broadcaster
       const broadcaster = new BLEBroadcaster();
       broadcaster.onConnectedCountChange = (count) => setListeners(count);
       await broadcaster.initialize();
       await broadcaster.startBroadcast();
       broadcasterRef.current = broadcaster;
 
-      let frames = 0;
-      const capture = new AudioCapture(async (encoded) => {
-        frames++;
-        setFramesSent(frames);
-        await broadcaster.sendFrame(encoded).catch(console.warn);
+      // 2. Avvia la cattura vocale (SpeechRecognition → testo)
+      const capture = new SpeechCapture(sourceLang, async (text, isFinal) => {
+        setLiveText(text);
+
+        // Invia via BLE solo le frasi finali (non i risultati parziali)
+        // oppure i parziali se la frase supera 40 caratteri (per lingue rapide)
+        if (isFinal || text.length > 40) {
+          try {
+            await broadcaster.sendText(text, isFinal);
+            sentRef.current++;
+            setFramesSent(sentRef.current);
+          } catch (e) {
+            console.warn('[BroadcasterView] sendText error:', e);
+          }
+        }
+
+        // Resetta il testo a schermo dopo la frase finale
+        if (isFinal) setTimeout(() => setLiveText(''), 1500);
       });
+
       await capture.start();
       captureRef.current = capture;
 
@@ -44,7 +63,7 @@ export default function BroadcasterView({ onBack }: Props) {
       setError(err instanceof Error ? err.message : 'Errore sconosciuto');
       setState('error');
     }
-  }, []);
+  }, [sourceLang]);
 
   const stop = useCallback(async () => {
     setState('stopping');
@@ -55,6 +74,7 @@ export default function BroadcasterView({ onBack }: Props) {
     broadcasterRef.current = null;
     setListeners(0);
     setFramesSent(0);
+    setLiveText('');
     setState('idle');
   }, []);
 
@@ -93,8 +113,8 @@ export default function BroadcasterView({ onBack }: Props) {
           )}
         </div>
 
-        {/* Mic button */}
-        <div className="flex flex-col items-center gap-5">
+        {/* Mic button + live text */}
+        <div className="flex flex-col items-center gap-5 w-full max-w-xs">
           <div className="relative flex items-center justify-center">
             {isLive && (
               <>
@@ -129,13 +149,30 @@ export default function BroadcasterView({ onBack }: Props) {
             {state === 'stopping' && <p className="text-gray-400 animate-pulse">Interruzione...</p>}
             {state === 'error'    && <p className="text-red-400 text-sm">{error}</p>}
           </div>
+
+          {/* Live transcription box */}
+          {isLive && (
+            <div className="w-full min-h-[60px] bg-[#111] border border-[#2a2a2a] rounded-2xl px-4 py-3
+                            flex items-start gap-2">
+              <Mic className="w-4 h-4 text-red-400 mt-0.5 shrink-0 animate-pulse" />
+              <p className="text-gray-300 text-sm leading-relaxed">
+                {liveText || <span className="text-gray-600 italic">In ascolto...</span>}
+              </p>
+            </div>
+          )}
         </div>
 
         {/* Stats */}
         {isLive ? (
           <div className="w-full max-w-xs flex gap-3">
-            <StatCard icon={<Users className="w-4 h-4" />} label="In ascolto" value={listeners.toString()} color="text-blue-400" />
-            <StatCard icon={<Radio className="w-4 h-4" />}  label="Frame inviati" value={framesSent.toString()} color="text-green-400" />
+            <StatCard icon={<Users className="w-4 h-4" />}
+                      label="In ascolto"
+                      value={listeners.toString()}
+                      color="text-blue-400" />
+            <StatCard icon={<Radio className="w-4 h-4" />}
+                      label="Frasi inviate"
+                      value={framesSent.toString()}
+                      color="text-green-400" />
           </div>
         ) : (
           <p className="text-xs text-gray-600 text-center">

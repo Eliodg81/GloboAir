@@ -1,11 +1,12 @@
 /**
- * GloboAir BLE Protocol v0.1
+ * GloboAir BLE Protocol v0.2
  *
  * Architettura:
  *   - Broadcaster agisce come GATT Peripheral (server)
  *   - Receivers agiscono come GATT Central (client)
- *   - Audio Opus 8kbps → pacchetti ~20 bytes ogni 20ms → 1 pacchetto BLE
- *   - Header 4 bytes + data → max 512 bytes per pacchetto (BLE 5.0 MTU)
+ *   - v0.2: testo trascritto (STT) → BLE → ogni receiver traduce + TTS
+ *     Payload tipico: 30-150 bytes per frase (vs 800+ bytes audio)
+ *   - Header 5 bytes → data
  *
  * Fase 2 (illimitati): switch a BLE Extended Advertising (no connessione richiesta)
  */
@@ -30,6 +31,8 @@ export const MAX_CHUNK_DATA = MAX_BLE_MTU - HEADER_SIZE; // 507 bytes
 
 export const FLAG_FIRST_FRAME = 0x01;
 export const FLAG_SILENCE     = 0x02;
+export const FLAG_TEXT        = 0x04;  // v0.2: il payload è testo UTF-8, non audio
+export const FLAG_TEXT_FINAL  = 0x08;  // v0.2: è la frase finale/completa (non interim)
 
 export interface AudioChunk {
   frameId: number;       // 16-bit — identifica il frame audio (200ms di audio)
@@ -114,6 +117,38 @@ export class FrameReassembler {
     this.frames.clear();
     this.lastFrameId = -1;
   }
+}
+
+// ─── v0.2 Text Frame ─────────────────────────────────────────────────────────
+// Formato: [seqId_hi][seqId_lo][flags: FLAG_TEXT | FLAG_TEXT_FINAL?][...utf8...]
+// Inviato sullo stesso AUDIO_CHARACTERISTIC_UUID — il receiver discrimina via FLAG_TEXT
+
+export const TEXT_FRAME_HEADER_SIZE = 3;
+
+export interface TextFrame {
+  seqId: number;    // 16-bit sequence ID
+  isFinal: boolean; // true = frase completa, false = risultato parziale (interim)
+  text: string;
+}
+
+export function encodeTextFrame(frame: TextFrame): Uint8Array {
+  const textBytes = new TextEncoder().encode(frame.text);
+  const buf = new Uint8Array(TEXT_FRAME_HEADER_SIZE + textBytes.length);
+  buf[0] = (frame.seqId >> 8) & 0xFF;
+  buf[1] = frame.seqId & 0xFF;
+  buf[2] = FLAG_TEXT | (frame.isFinal ? FLAG_TEXT_FINAL : 0);
+  buf.set(textBytes, TEXT_FRAME_HEADER_SIZE);
+  return buf;
+}
+
+export function decodeTextFrame(raw: Uint8Array): TextFrame {
+  if (raw.length < TEXT_FRAME_HEADER_SIZE) throw new Error('TextFrame too short');
+  const flags = raw[2];
+  return {
+    seqId: (raw[0] << 8) | raw[1],
+    isFinal: (flags & FLAG_TEXT_FINAL) !== 0,
+    text: new TextDecoder('utf-8').decode(raw.slice(TEXT_FRAME_HEADER_SIZE)),
+  };
 }
 
 function mergeChunks(chunks: Uint8Array[]): Uint8Array {
