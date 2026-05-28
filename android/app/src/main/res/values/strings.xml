@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">GloboAir</string>
+    <string name="title_activity_main">GloboAir</string>
+    <string name="package_name">com.globoup.globoair</string>
+    <string name="custom_url_scheme">com.globoup.globoair</string>
+</resources>
