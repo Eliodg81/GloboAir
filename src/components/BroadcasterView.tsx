@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { ArrowLeft, Radio, Square, Users } from 'lucide-react';
 import { BLEBroadcaster } from '../ble/BLEBroadcaster';
 import { AudioCapture } from '../audio/AudioCapture';
+import LanguagePicker from './LanguagePicker';
 
 interface Props { onBack: () => void; }
 
@@ -12,26 +13,23 @@ export default function BroadcasterView({ onBack }: Props) {
   const [listeners, setListeners] = useState(0);
   const [framesSent, setFramesSent] = useState(0);
   const [error, setError] = useState('');
-  const [level, setLevel] = useState(0);
+  const [sourceLang, setSourceLang] = useState('it'); // lingua in cui parla il broadcaster
 
   const broadcasterRef = useRef<BLEBroadcaster | null>(null);
   const captureRef = useRef<AudioCapture | null>(null);
-  const levelIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const analyserRef = useRef<AnalyserNode | null>(null);
+
+  const isLive = state === 'live';
 
   const start = useCallback(async () => {
     setState('starting');
     setError('');
-
     try {
-      // Init BLE broadcaster
       const broadcaster = new BLEBroadcaster();
       broadcaster.onConnectedCountChange = (count) => setListeners(count);
       await broadcaster.initialize();
       await broadcaster.startBroadcast();
       broadcasterRef.current = broadcaster;
 
-      // Init audio capture
       let frames = 0;
       const capture = new AudioCapture(async (encoded) => {
         frames++;
@@ -43,8 +41,7 @@ export default function BroadcasterView({ onBack }: Props) {
 
       setState('live');
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Errore sconosciuto';
-      setError(msg);
+      setError(err instanceof Error ? err.message : 'Errore sconosciuto');
       setState('error');
     }
   }, []);
@@ -58,20 +55,15 @@ export default function BroadcasterView({ onBack }: Props) {
     broadcasterRef.current = null;
     setListeners(0);
     setFramesSent(0);
-    setLevel(0);
     setState('idle');
   }, []);
 
-  // Cleanup on unmount
   useEffect(() => {
     return () => {
       captureRef.current?.stop();
       broadcasterRef.current?.stopBroadcast().catch(() => {});
-      if (levelIntervalRef.current) clearInterval(levelIntervalRef.current);
     };
   }, []);
-
-  const isLive = state === 'live';
 
   return (
     <div className="flex-1 flex flex-col bg-[#0a0a0a]">
@@ -84,91 +76,72 @@ export default function BroadcasterView({ onBack }: Props) {
         <h2 className="ml-3 text-base font-semibold text-white">Modalità Broadcast</h2>
       </div>
 
-      {/* Main area */}
-      <div className="flex-1 flex flex-col items-center justify-center px-8 gap-8">
+      <div className="flex-1 flex flex-col items-center justify-between px-6 py-4">
 
-        {/* Big button */}
-        <div className="relative flex items-center justify-center">
-          {/* Ping rings when live */}
+        {/* Language selector — visibile solo quando non live */}
+        <div className="w-full max-w-xs relative">
+          <LanguagePicker
+            label="Sto parlando in"
+            value={sourceLang}
+            onChange={setSourceLang}
+            disabled={isLive}
+          />
           {isLive && (
-            <>
-              <div className="absolute w-52 h-52 rounded-full bg-red-500/10 animate-ping" style={{ animationDuration: '2s' }} />
-              <div className="absolute w-44 h-44 rounded-full bg-red-500/15 animate-ping" style={{ animationDuration: '1.5s' }} />
-            </>
-          )}
-
-          <button
-            onClick={isLive ? stop : start}
-            disabled={state === 'starting' || state === 'stopping'}
-            className={`relative w-36 h-36 rounded-full flex items-center justify-center
-                        shadow-2xl active:scale-95 transition-all duration-200 disabled:opacity-50
-                        ${isLive
-                          ? 'bg-red-500 shadow-red-500/40 hover:bg-red-600'
-                          : 'bg-green-500 shadow-green-500/40 hover:bg-green-400'
-                        }`}
-          >
-            {isLive
-              ? <Square className="w-12 h-12 text-white fill-white" />
-              : <Radio className="w-12 h-12 text-white" />
-            }
-          </button>
-        </div>
-
-        {/* Status text */}
-        <div className="text-center">
-          {state === 'idle' && (
-            <p className="text-gray-400 text-base">Premi per iniziare la trasmissione</p>
-          )}
-          {state === 'starting' && (
-            <p className="text-yellow-400 text-base animate-pulse">Avvio in corso...</p>
-          )}
-          {state === 'live' && (
-            <div className="flex flex-col items-center gap-1">
-              <p className="text-red-400 text-base font-semibold animate-pulse">
-                🔴 IN ONDA
-              </p>
-              <p className="text-gray-400 text-sm">
-                Parla nel microfono
-              </p>
-            </div>
-          )}
-          {state === 'stopping' && (
-            <p className="text-gray-400 text-base animate-pulse">Interruzione...</p>
-          )}
-          {state === 'error' && (
-            <div className="text-center">
-              <p className="text-red-400 text-base">Errore</p>
-              <p className="text-gray-500 text-xs mt-1">{error}</p>
-            </div>
+            <p className="text-xs text-gray-600 mt-2 text-center">
+              Lingua bloccata durante la trasmissione
+            </p>
           )}
         </div>
 
-        {/* Stats — visibili solo quando live */}
-        {isLive && (
-          <div className="w-full max-w-xs flex gap-3">
-            <StatCard
-              icon={<Users className="w-4 h-4" />}
-              label="In ascolto"
-              value={listeners.toString()}
-              color="text-blue-400"
-            />
-            <StatCard
-              icon={<Radio className="w-4 h-4" />}
-              label="Frame inviati"
-              value={framesSent.toString()}
-              color="text-green-400"
-            />
+        {/* Mic button */}
+        <div className="flex flex-col items-center gap-5">
+          <div className="relative flex items-center justify-center">
+            {isLive && (
+              <>
+                <div className="absolute w-52 h-52 rounded-full bg-red-500/10 animate-ping"
+                     style={{ animationDuration: '2s' }} />
+                <div className="absolute w-44 h-44 rounded-full bg-red-500/15 animate-ping"
+                     style={{ animationDuration: '1.5s', animationDelay: '0.3s' }} />
+              </>
+            )}
+            <button
+              onClick={isLive ? stop : start}
+              disabled={state === 'starting' || state === 'stopping'}
+              className={`relative w-36 h-36 rounded-full flex items-center justify-center
+                          shadow-2xl active:scale-95 transition-all duration-200 disabled:opacity-50
+                          ${isLive
+                            ? 'bg-red-500 shadow-red-500/40 hover:bg-red-600'
+                            : 'bg-green-500 shadow-green-500/40 hover:bg-green-400'
+                          }`}
+            >
+              {isLive
+                ? <Square className="w-12 h-12 text-white fill-white" />
+                : <Radio className="w-12 h-12 text-white" />
+              }
+            </button>
           </div>
-        )}
-      </div>
 
-      {/* Footer info */}
-      <div className="px-8 pb-6 text-center">
-        <p className="text-xs text-gray-600">
-          {isLive
-            ? 'I telefoni vicini possono connettersi aprendo GloboAir'
-            : 'Raggio ~30m · Nessun internet richiesto'}
-        </p>
+          {/* Status */}
+          <div className="text-center min-h-[40px]">
+            {state === 'idle'     && <p className="text-gray-400">Premi per trasmettere</p>}
+            {state === 'starting' && <p className="text-yellow-400 animate-pulse">Avvio...</p>}
+            {state === 'live'     && <p className="text-red-400 font-semibold animate-pulse">🔴 IN ONDA</p>}
+            {state === 'stopping' && <p className="text-gray-400 animate-pulse">Interruzione...</p>}
+            {state === 'error'    && <p className="text-red-400 text-sm">{error}</p>}
+          </div>
+        </div>
+
+        {/* Stats */}
+        {isLive ? (
+          <div className="w-full max-w-xs flex gap-3">
+            <StatCard icon={<Users className="w-4 h-4" />} label="In ascolto" value={listeners.toString()} color="text-blue-400" />
+            <StatCard icon={<Radio className="w-4 h-4" />}  label="Frame inviati" value={framesSent.toString()} color="text-green-400" />
+          </div>
+        ) : (
+          <p className="text-xs text-gray-600 text-center">
+            Raggio ~30m · Nessun internet richiesto
+          </p>
+        )}
       </div>
     </div>
   );
