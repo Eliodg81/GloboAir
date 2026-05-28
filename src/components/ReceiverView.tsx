@@ -95,12 +95,16 @@ export default function ReceiverView({ onBack }: Props) {
 
       // ── Pipeline audio diretto (modalità Voce) ───────────────────────────
       receiver.onFrame = (pcm8: Uint8Array) => {
+        setFramesReceived(r => r + 1); // conta SEMPRE, indipendentemente dal player
         if (!audioPlayerRef.current) {
-          console.warn('[ReceiverView] onFrame: audioPlayer è null!');
+          // Prova inizializzazione lazy (fallback se startScan non è riuscito)
+          const ap = new AudioStreamPlayer();
+          ap.initialize()
+            .then(() => { audioPlayerRef.current = ap; ap.playChunk(pcm8); })
+            .catch(e => console.warn('[ReceiverView] lazy AudioStreamPlayer init failed:', e));
           return;
         }
         audioPlayerRef.current.playChunk(pcm8);
-        setFramesReceived(r => r + 1);
       };
       receiver.onSessionFound = (session) => {
         setSessions(prev =>
