@@ -83,14 +83,24 @@ public class BLEPeripheralPlugin: CAPPlugin, CBPeripheralManagerDelegate {
 
     @objc func startAdvertising(_ call: CAPPluginCall) {
         guard let pm = peripheralManager else {
-            call.reject("Not initialized")
+            call.reject("Chiama initialize() prima")
             return
         }
-        if pm.state != .poweredOn {
+        switch pm.state {
+        case .poweredOn:
+            _startAdvertising(call: call)
+        case .unknown, .resetting:
+            // Stato transitorio: aspetta il callback
             pendingStartCall = call
-            return
+        case .poweredOff:
+            call.reject("Bluetooth è spento — attivalo in Impostazioni")
+        case .unauthorized:
+            call.reject("Permesso Bluetooth negato — vai in Impostazioni → GloboAir → Bluetooth")
+        case .unsupported:
+            call.reject("Bluetooth non supportato su questo dispositivo")
+        @unknown default:
+            call.reject("Bluetooth non disponibile")
         }
-        _startAdvertising(call: call)
     }
 
     private func _startAdvertising(call: CAPPluginCall) {
@@ -152,11 +162,24 @@ public class BLEPeripheralPlugin: CAPPlugin, CBPeripheralManagerDelegate {
             .unsupported: "unsupported", .unauthorized: "unauthorized",
             .poweredOff: "poweredOff", .poweredOn: "poweredOn"
         ]
-        notifyListeners("stateChange", data: ["state": stateMap[peripheral.state] ?? "unknown"])
+        let stateStr = stateMap[peripheral.state] ?? "unknown"
+        notifyListeners("stateChange", data: ["state": stateStr])
 
-        if peripheral.state == .poweredOn, let pending = pendingStartCall {
-            pendingStartCall = nil
+        guard let pending = pendingStartCall else { return }
+        pendingStartCall = nil
+
+        switch peripheral.state {
+        case .poweredOn:
             _startAdvertising(call: pending)
+        case .poweredOff:
+            pending.reject("Bluetooth è spento — attivalo in Impostazioni")
+        case .unauthorized:
+            pending.reject("Permesso Bluetooth negato — vai in Impostazioni → GloboAir → Bluetooth")
+        case .unsupported:
+            pending.reject("Bluetooth non supportato su questo dispositivo")
+        default:
+            // resetting: rimetti in attesa e riprova
+            pendingStartCall = pending
         }
     }
 

@@ -91,6 +91,7 @@ export default function BroadcasterView({ onBack }: Props) {
     setState('starting');
     setError('');
     sentRef.current = 0;
+    console.log('[BroadcasterView] start() chiamato, mode =', mode);
 
     // Crea translator se necessario
     if ((mode === 'openai' || mode === 'realtime') && hasApiKey) {
@@ -98,10 +99,14 @@ export default function BroadcasterView({ onBack }: Props) {
     }
 
     try {
+      console.log('[BroadcasterView] creazione BLEBroadcaster...');
       const broadcaster = new BLEBroadcaster();
       broadcaster.onConnectedCountChange = (count) => setListeners(count);
+      console.log('[BroadcasterView] initialize()...');
       await broadcaster.initialize();
+      console.log('[BroadcasterView] startBroadcast()...');
       await broadcaster.startBroadcast();
+      console.log('[BroadcasterView] advertising avviato!');
       broadcasterRef.current = broadcaster;
 
       if (mode === 'voice') {
@@ -144,7 +149,8 @@ export default function BroadcasterView({ onBack }: Props) {
 
       setState('live');
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Errore sconosciuto';
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error('[BroadcasterView] ERRORE:', msg);
       setError(msg);
       setState('error');
     }
@@ -373,7 +379,14 @@ export default function BroadcasterView({ onBack }: Props) {
               </div>
             )}
             {state === 'stopping' && <p className="text-gray-400 animate-pulse">Interruzione...</p>}
-            {state === 'error'    && <p className="text-red-400 text-sm text-center">{error}</p>}
+            {state === 'error'    && (
+              <div className="bg-red-500/10 border border-red-500/40 rounded-2xl px-4 py-3 w-full">
+                <p className="text-red-400 text-xs font-bold uppercase mb-1">Errore</p>
+                <p className="text-red-300 text-sm leading-relaxed">{error}</p>
+                <button onClick={() => setState('idle')}
+                  className="mt-2 text-xs text-red-400 underline">Riprova</button>
+              </div>
+            )}
           </div>
 
           {/* Live transcription box */}
