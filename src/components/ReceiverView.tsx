@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { ArrowLeft, Headphones, Search, Wifi, Volume2, X, Radio, Languages, Sparkles, Eye, EyeOff } from 'lucide-react';
+import { ArrowLeft, Headphones, Search, Wifi, Volume2, X, Radio, Languages, Sparkles, Eye, EyeOff, Mic } from 'lucide-react';
 import { BLEReceiver, BroadcastSession } from '../ble/BLEReceiver';
 import { TranslationEngine } from '../audio/TranslationEngine';
 import { OpenAITranslator } from '../audio/OpenAITranslator';
@@ -10,9 +10,11 @@ import LanguagePicker from './LanguagePicker';
 interface Props { onBack: () => void; }
 
 type ViewState = 'idle' | 'scanning' | 'connecting' | 'listening' | 'error';
+type ReceiveMode = 'voice' | 'translation';
 
 export default function ReceiverView({ onBack }: Props) {
   const [viewState, setViewState] = useState<ViewState>('idle');
+  const [receiveMode, setReceiveMode] = useState<ReceiveMode>('translation');
   const [sessions, setSessions] = useState<BroadcastSession[]>([]);
   const [framesReceived, setFramesReceived] = useState(0);
   const [error, setError] = useState('');
@@ -20,6 +22,7 @@ export default function ReceiverView({ onBack }: Props) {
   const [originalText, setOriginalText] = useState('');
   const [translatedText, setTranslatedText] = useState('');
   const [translationMode, setTranslationMode] = useState<'free' | 'ai' | 'preTranslated'>('free');
+  const receiveModeRef = useRef<ReceiveMode>('translation');
 
   // Modalità OpenAI receiver-side
   const [useOpenAI, setUseOpenAI] = useState(OpenAITranslator.hasKey('receiver'));
@@ -37,6 +40,7 @@ export default function ReceiverView({ onBack }: Props) {
   const apiKeyRef     = useRef(apiKey);
 
   // Mantieni ref aggiornate per uso nei callback BLE
+  useEffect(() => { receiveModeRef.current = receiveMode; }, [receiveMode]);
   useEffect(() => { targetLangRef.current = targetLang; }, [targetLang]);
   useEffect(() => { useOpenAIRef.current = useOpenAI; }, [useOpenAI]);
   useEffect(() => { apiKeyRef.current = apiKey; }, [apiKey]);
@@ -104,6 +108,7 @@ export default function ReceiverView({ onBack }: Props) {
 
       // ── Pipeline testo → traduzione → TTS ────────────────────────────────
       receiver.onText = async (text, isFinal, isPreTranslated) => {
+        if (receiveModeRef.current === 'voice') return; // in voce diretta ignora il testo
         setFramesReceived(r => r + 1);
         setOriginalText(isPreTranslated ? '' : text); // se già tradotto non mostrare l'originale
 
@@ -215,21 +220,23 @@ export default function ReceiverView({ onBack }: Props) {
 
       <div className="flex-1 flex flex-col items-center justify-between px-6 py-4 gap-4">
 
-        {/* Language selector */}
-        <div className="w-full max-w-xs relative">
-          <LanguagePicker
-            label="Voglio ascoltare in"
-            value={targetLang}
-            onChange={(lang) => {
-              setTargetLang(lang);
-              if (receiverRef.current) receiverRef.current.targetLang = lang;
-            }}
-            disabled={isListening}
-          />
-        </div>
+        {/* Language selector — solo in modalità traduzione */}
+        {receiveMode === 'translation' && (
+          <div className="w-full max-w-xs relative">
+            <LanguagePicker
+              label="Voglio ascoltare in"
+              value={targetLang}
+              onChange={(lang) => {
+                setTargetLang(lang);
+                if (receiverRef.current) receiverRef.current.targetLang = lang;
+              }}
+              disabled={isListening}
+            />
+          </div>
+        )}
 
-        {/* ── OpenAI Toggle (solo quando non in ascolto) ── */}
-        {!isListening && (
+        {/* ── OpenAI Toggle (solo traduzione e non in ascolto) ── */}
+        {receiveMode === 'translation' && !isListening && (
           <div className="w-full max-w-xs">
             <button
               onClick={() => {
@@ -303,13 +310,75 @@ export default function ReceiverView({ onBack }: Props) {
           {/* IDLE */}
           {viewState === 'idle' && (
             <>
-              <div className="w-24 h-24 rounded-full bg-[#1a1a1a] border border-[#2a2a2a]
-                              flex items-center justify-center">
-                <Headphones className="w-10 h-10 text-gray-500" />
+              {/* Mode cards */}
+              <div className="w-full flex flex-col gap-3">
+                <p className="text-xs text-gray-500 uppercase tracking-widest text-center">Modalità di ascolto</p>
+
+                {/* Voce diretta */}
+                <button
+                  onClick={() => setReceiveMode('voice')}
+                  className={`w-full flex items-center gap-4 px-4 py-4 rounded-2xl border transition-all
+                              ${receiveMode === 'voice'
+                                ? 'bg-green-500/10 border-green-500/50'
+                                : 'bg-[#1a1a1a] border-[#2a2a2a]'}`}
+                >
+                  <div className={`w-11 h-11 rounded-xl flex items-center justify-center shrink-0
+                                  ${receiveMode === 'voice' ? 'bg-green-500/20' : 'bg-[#252525]'}`}>
+                    <Mic className={`w-5 h-5 ${receiveMode === 'voice' ? 'text-green-400' : 'text-gray-500'}`} />
+                  </div>
+                  <div className="text-left flex-1">
+                    <div className="flex items-center gap-2">
+                      <p className={`text-sm font-semibold ${receiveMode === 'voice' ? 'text-green-300' : 'text-gray-300'}`}>
+                        Voce diretta
+                      </p>
+                      <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-green-500/20 text-green-400 font-medium">
+                        Gratis
+                      </span>
+                    </div>
+                    <p className="text-xs text-gray-600 mt-0.5">Audio diretto, come una telefonata</p>
+                  </div>
+                  <div className={`w-5 h-5 rounded-full border-2 flex items-center justify-center shrink-0
+                                  ${receiveMode === 'voice' ? 'border-green-400' : 'border-gray-600'}`}>
+                    {receiveMode === 'voice' && <div className="w-2.5 h-2.5 rounded-full bg-green-400" />}
+                  </div>
+                </button>
+
+                {/* Con traduzione */}
+                <button
+                  onClick={() => setReceiveMode('translation')}
+                  className={`w-full flex items-center gap-4 px-4 py-4 rounded-2xl border transition-all
+                              ${receiveMode === 'translation'
+                                ? 'bg-blue-500/10 border-blue-500/50'
+                                : 'bg-[#1a1a1a] border-[#2a2a2a]'}`}
+                >
+                  <div className={`w-11 h-11 rounded-xl flex items-center justify-center shrink-0
+                                  ${receiveMode === 'translation' ? 'bg-blue-500/20' : 'bg-[#252525]'}`}>
+                    <Languages className={`w-5 h-5 ${receiveMode === 'translation' ? 'text-blue-400' : 'text-gray-500'}`} />
+                  </div>
+                  <div className="text-left flex-1">
+                    <div className="flex items-center gap-2">
+                      <p className={`text-sm font-semibold ${receiveMode === 'translation' ? 'text-blue-300' : 'text-gray-300'}`}>
+                        Con traduzione
+                      </p>
+                      <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-blue-500/20 text-blue-400 font-medium">
+                        Testo + audio
+                      </span>
+                    </div>
+                    <p className="text-xs text-gray-600 mt-0.5">Trascrivi e traduci in tempo reale</p>
+                  </div>
+                  <div className={`w-5 h-5 rounded-full border-2 flex items-center justify-center shrink-0
+                                  ${receiveMode === 'translation' ? 'border-blue-400' : 'border-gray-600'}`}>
+                    {receiveMode === 'translation' && <div className="w-2.5 h-2.5 rounded-full bg-blue-400" />}
+                  </div>
+                </button>
               </div>
+
               <button onClick={startScan}
-                className="px-8 py-4 rounded-full bg-blue-500 text-white font-semibold text-base
-                           shadow-[0_0_30px_rgba(59,130,246,0.4)] active:scale-95 transition-transform">
+                className={`px-8 py-4 rounded-full text-white font-semibold text-base
+                           active:scale-95 transition-transform
+                           ${receiveMode === 'voice'
+                             ? 'bg-green-500 shadow-[0_0_30px_rgba(34,197,94,0.4)]'
+                             : 'bg-blue-500 shadow-[0_0_30px_rgba(59,130,246,0.4)]'}`}>
                 Cerca sessioni
               </button>
             </>
@@ -353,57 +422,80 @@ export default function ReceiverView({ onBack }: Props) {
           {/* LISTENING */}
           {isListening && (
             <>
-              <div className="relative w-36 h-36 flex items-center justify-center">
-                <div className="absolute w-36 h-36 rounded-full bg-blue-500/10 animate-ping"
-                     style={{ animationDuration: '2s' }} />
-                <div className="w-24 h-24 rounded-full bg-blue-500 flex items-center justify-center
-                                shadow-[0_0_40px_rgba(59,130,246,0.5)]">
-                  <Volume2 className="w-10 h-10 text-white" />
-                </div>
-              </div>
+              {receiveMode === 'voice' ? (
+                /* ── VOCE DIRETTA ── */
+                <>
+                  <div className="relative w-36 h-36 flex items-center justify-center">
+                    <div className="absolute w-36 h-36 rounded-full bg-green-500/10 animate-ping"
+                         style={{ animationDuration: '1.5s' }} />
+                    <div className="absolute w-28 h-28 rounded-full bg-green-500/10 animate-ping"
+                         style={{ animationDuration: '1.5s', animationDelay: '0.4s' }} />
+                    <div className="w-24 h-24 rounded-full bg-green-500 flex items-center justify-center
+                                    shadow-[0_0_40px_rgba(34,197,94,0.5)]">
+                      <Mic className="w-10 h-10 text-white" />
+                    </div>
+                  </div>
+                  <div className="text-center">
+                    <p className="text-green-400 font-semibold text-lg">Voce diretta</p>
+                    <p className="text-gray-500 text-sm mt-0.5">🎙️ Audio in tempo reale</p>
+                  </div>
+                  <StatCard label="Pacchetti audio ricevuti" value={framesReceived.toString()} />
+                </>
+              ) : (
+                /* ── CON TRADUZIONE ── */
+                <>
+                  <div className="relative w-36 h-36 flex items-center justify-center">
+                    <div className="absolute w-36 h-36 rounded-full bg-blue-500/10 animate-ping"
+                         style={{ animationDuration: '2s' }} />
+                    <div className="w-24 h-24 rounded-full bg-blue-500 flex items-center justify-center
+                                    shadow-[0_0_40px_rgba(59,130,246,0.5)]">
+                      <Volume2 className="w-10 h-10 text-white" />
+                    </div>
+                  </div>
+                  <div className="text-center">
+                    <p className="text-blue-400 font-semibold text-lg">In ascolto</p>
+                    <p className="text-gray-500 text-sm mt-0.5">
+                      {translationMode === 'preTranslated' && '✨ Tradotto dalla guida'}
+                      {translationMode === 'ai'            && '🤖 Traduzione AI (OpenAI)'}
+                      {translationMode === 'free'          && '🌐 Traduzione gratuita'}
+                    </p>
+                  </div>
 
-              <div className="text-center">
-                <p className="text-blue-400 font-semibold text-lg">In ascolto</p>
-                <p className="text-gray-500 text-sm mt-0.5">
-                  {translationMode === 'preTranslated' && '✨ Tradotto dalla guida'}
-                  {translationMode === 'ai'            && '🤖 Traduzione AI (OpenAI)'}
-                  {translationMode === 'free'          && '🌐 Traduzione gratuita'}
-                </p>
-              </div>
-
-              {/* Live translation */}
-              {(originalText || translatedText) && (
-                <div className="w-full flex flex-col gap-2">
-                  {originalText && (
-                    <div className="bg-[#111] border border-[#2a2a2a] rounded-2xl px-4 py-3">
-                      <p className="text-[10px] text-gray-600 uppercase tracking-widest mb-1">Originale</p>
-                      <p className="text-gray-400 text-sm leading-relaxed">{originalText}</p>
+                  {/* Live translation */}
+                  {(originalText || translatedText) && (
+                    <div className="w-full flex flex-col gap-2">
+                      {originalText && (
+                        <div className="bg-[#111] border border-[#2a2a2a] rounded-2xl px-4 py-3">
+                          <p className="text-[10px] text-gray-600 uppercase tracking-widest mb-1">Originale</p>
+                          <p className="text-gray-400 text-sm leading-relaxed">{originalText}</p>
+                        </div>
+                      )}
+                      {translatedText && (
+                        <div className={`border rounded-2xl px-4 py-3 flex items-start gap-2
+                                        ${translationMode === 'preTranslated'
+                                          ? 'bg-purple-500/10 border-purple-500/30'
+                                          : translationMode === 'ai'
+                                            ? 'bg-purple-500/10 border-purple-500/30'
+                                            : 'bg-blue-500/10 border-blue-500/30'}`}>
+                          {translationMode !== 'free'
+                            ? <Sparkles className="w-4 h-4 text-purple-400 mt-0.5 shrink-0" />
+                            : <Languages className="w-4 h-4 text-blue-400 mt-0.5 shrink-0" />
+                          }
+                          <div>
+                            <p className={`text-[10px] uppercase tracking-widest mb-1
+                                          ${translationMode !== 'free' ? 'text-purple-400/70' : 'text-blue-400/70'}`}>
+                              Traduzione
+                            </p>
+                            <p className="text-white text-sm font-medium leading-relaxed">{translatedText}</p>
+                          </div>
+                        </div>
+                      )}
                     </div>
                   )}
-                  {translatedText && (
-                    <div className={`border rounded-2xl px-4 py-3 flex items-start gap-2
-                                    ${translationMode === 'preTranslated'
-                                      ? 'bg-purple-500/10 border-purple-500/30'
-                                      : translationMode === 'ai'
-                                        ? 'bg-purple-500/10 border-purple-500/30'
-                                        : 'bg-blue-500/10 border-blue-500/30'}`}>
-                      {translationMode !== 'free'
-                        ? <Sparkles className="w-4 h-4 text-purple-400 mt-0.5 shrink-0" />
-                        : <Languages className="w-4 h-4 text-blue-400 mt-0.5 shrink-0" />
-                      }
-                      <div>
-                        <p className={`text-[10px] uppercase tracking-widest mb-1
-                                      ${translationMode !== 'free' ? 'text-purple-400/70' : 'text-blue-400/70'}`}>
-                          Traduzione
-                        </p>
-                        <p className="text-white text-sm font-medium leading-relaxed">{translatedText}</p>
-                      </div>
-                    </div>
-                  )}
-                </div>
+                  <StatCard label="Frasi ricevute" value={framesReceived.toString()} />
+                </>
               )}
 
-              <StatCard label="Frasi ricevute" value={framesReceived.toString()} />
               <button onClick={stopAll}
                 className="px-6 py-3 rounded-full border border-[#2a2a2a] text-gray-400
                            hover:text-white hover:border-gray-500 transition-colors text-sm">
@@ -426,7 +518,11 @@ export default function ReceiverView({ onBack }: Props) {
 
         {/* Footer */}
         <p className="text-xs text-gray-700 text-center">
-          {isListening ? 'Bluetooth · Traduzione via internet' : 'Solo Bluetooth'}
+          {isListening
+            ? receiveMode === 'voice'
+              ? 'Solo Bluetooth · Nessuna connessione internet'
+              : 'Bluetooth · Traduzione via internet'
+            : 'Solo Bluetooth'}
         </p>
       </div>
     </div>
