@@ -1,3 +1,5 @@
+import { BLEPeripheral } from '../ble/BLEBroadcaster';
+
 /**
  * AudioStreamCapture — cattura microfono e produce chunk PCM 8kHz 8-bit
  *
@@ -15,6 +17,11 @@ export class AudioStreamCapture {
   private readonly BUFFER_SIZE = 4096; // campioni per callback (al sample rate nativo)
 
   async start(onPCM: (samples: Uint8Array) => void): Promise<void> {
+    // Su Android/iOS richiedi il permesso microfono prima di getUserMedia
+    try {
+      await BLEPeripheral.requestMicPermission();
+    } catch { /* se il plugin non supporta il metodo, procedi comunque */ }
+
     this.stream = await navigator.mediaDevices.getUserMedia({
       audio: {
         channelCount: 1,

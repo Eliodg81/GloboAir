@@ -1,6 +1,7 @@
 import Foundation
 import Capacitor
 import CoreBluetooth
+import AVFoundation
 
 @objc(BLEPeripheralPlugin)
 public class BLEPeripheralPlugin: CAPPlugin, CBPeripheralManagerDelegate {
@@ -13,6 +14,12 @@ public class BLEPeripheralPlugin: CAPPlugin, CBPeripheralManagerDelegate {
 
     private let GLOBOAIR_SERVICE_UUID = "47410000-0000-1000-8000-00805f9b34fb"
     private let AUDIO_CHAR_UUID       = "47410001-0000-1000-8000-00805f9b34fb"
+
+    @objc func requestMicPermission(_ call: CAPPluginCall) {
+        AVAudioSession.sharedInstance().requestRecordPermission { granted in
+            call.resolve(["granted": granted])
+        }
+    }
 
     @objc func initialize(_ call: CAPPluginCall) {
         peripheralManager = CBPeripheralManager(delegate: self, queue: .main, options: [

@@ -73,6 +73,29 @@ class BLEPeripheralPlugin : Plugin() {
 
     // ─── startAdvertising — richiede permessi, poi avvia ─────────────────────
 
+    // ─── requestMicPermission ────────────────────────────────────────────────
+    // Richiede RECORD_AUDIO a runtime prima che getUserMedia venga chiamato dal JS
+
+    @PluginMethod
+    fun requestMicPermission(call: PluginCall) {
+        val granted = ActivityCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+        if (granted) {
+            call.resolve(JSObject().put("granted", true))
+        } else {
+            requestPermissionForAlias("microphone", call, "micPermissionCallback")
+        }
+    }
+
+    @PermissionCallback
+    private fun micPermissionCallback(call: PluginCall) {
+        val granted = ActivityCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+        if (granted) {
+            call.resolve(JSObject().put("granted", true))
+        } else {
+            call.reject("Permesso microfono negato")
+        }
+    }
+
     @PluginMethod
     fun startAdvertising(call: PluginCall) {
         val adapter = bluetoothAdapter ?: return call.reject("Non inizializzato — chiama initialize() prima")

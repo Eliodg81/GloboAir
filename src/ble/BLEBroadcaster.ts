@@ -24,6 +24,7 @@ import {
 // ─── Plugin nativo (Swift iOS / Kotlin Android) ───────────────────────────────
 export interface BLEPeripheralPlugin {
   initialize(): Promise<void>;
+  requestMicPermission(): Promise<{ granted: boolean }>;
   startAdvertising(options: { serviceUuid: string; localName: string }): Promise<void>;
   stopAdvertising(): Promise<void>;
   sendNotification(options: {
