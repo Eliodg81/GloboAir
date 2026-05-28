@@ -4,6 +4,7 @@ import { BLEReceiver, BroadcastSession } from '../ble/BLEReceiver';
 import { TranslationEngine } from '../audio/TranslationEngine';
 import { OpenAITranslator } from '../audio/OpenAITranslator';
 import { SpeechPlayer } from '../audio/SpeechPlayer';
+import { AudioStreamPlayer } from '../audio/AudioStreamPlayer';
 import LanguagePicker from './LanguagePicker';
 
 interface Props { onBack: () => void; }
@@ -26,10 +27,11 @@ export default function ReceiverView({ onBack }: Props) {
   const [showKey, setShowKey] = useState(false);
   const [showKeyInput, setShowKeyInput] = useState(false);
 
-  const receiverRef   = useRef<BLEReceiver | null>(null);
-  const myMemoryRef   = useRef<TranslationEngine | null>(null);
-  const openAIRef     = useRef<OpenAITranslator | null>(null);
-  const playerRef     = useRef<SpeechPlayer | null>(null);
+  const receiverRef    = useRef<BLEReceiver | null>(null);
+  const myMemoryRef    = useRef<TranslationEngine | null>(null);
+  const openAIRef      = useRef<OpenAITranslator | null>(null);
+  const playerRef      = useRef<SpeechPlayer | null>(null);
+  const audioPlayerRef = useRef<AudioStreamPlayer | null>(null);
   const targetLangRef = useRef(targetLang);
   const useOpenAIRef  = useRef(useOpenAI);
   const apiKeyRef     = useRef(apiKey);
@@ -65,8 +67,24 @@ export default function ReceiverView({ onBack }: Props) {
 
       receiver.onStateChange = (s) => {
         if (s === 'error') setViewState('error');
-        if (s === 'connected') setViewState('listening');
-        if (s === 'idle') setViewState('idle');
+        if (s === 'connected') {
+          setViewState('listening');
+          // Inizializza player audio per modalità Voce diretta
+          const ap = new AudioStreamPlayer();
+          ap.initialize();
+          audioPlayerRef.current = ap;
+        }
+        if (s === 'idle') {
+          audioPlayerRef.current?.stop();
+          audioPlayerRef.current = null;
+          setViewState('idle');
+        }
+      };
+
+      // ── Pipeline audio diretto (modalità Voce) ───────────────────────────
+      receiver.onFrame = (pcm8: Uint8Array) => {
+        audioPlayerRef.current?.playChunk(pcm8);
+        setFramesReceived(r => r + 1);
       };
       receiver.onSessionFound = (session) => {
         setSessions(prev =>
@@ -142,6 +160,7 @@ export default function ReceiverView({ onBack }: Props) {
 
   const stopAll = useCallback(async () => {
     playerRef.current?.stop();
+    audioPlayerRef.current?.stop();
     myMemoryRef.current?.destroy();
     openAIRef.current?.destroy();
     await receiverRef.current?.disconnect();
@@ -149,6 +168,7 @@ export default function ReceiverView({ onBack }: Props) {
     myMemoryRef.current = null;
     openAIRef.current = null;
     playerRef.current = null;
+    audioPlayerRef.current = null;
     setSessions([]);
     setFramesReceived(0);
     setOriginalText('');

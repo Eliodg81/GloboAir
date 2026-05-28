@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { ArrowLeft, Radio, Square, Users, Mic, Sparkles, Eye, EyeOff, Zap } from 'lucide-react';
 import { BLEBroadcaster } from '../ble/BLEBroadcaster';
 import { SpeechCapture } from '../audio/SpeechCapture';
+import { AudioStreamCapture } from '../audio/AudioStreamCapture';
 import { OpenAITranslator } from '../audio/OpenAITranslator';
 import { GloboAirRealtimeClient } from '../audio/GloboAirRealtimeClient';
 import LanguagePicker from './LanguagePicker';
@@ -11,12 +12,13 @@ interface Props { onBack: () => void; }
 type BroadcastState = 'idle' | 'starting' | 'live' | 'stopping' | 'error';
 
 /**
- * Tre modalità di trasmissione:
+ * Quattro modalità di trasmissione:
+ *   'voice'    — audio PCM diretto (qualità telefonica, no traduzione)
  *   'base'     — SpeechRecognition nativo + MyMemory (gratis per tutti)
  *   'openai'   — SpeechRecognition nativo + gpt-4o-mini (broadcaster paga, ~$0.002/ora)
  *   'realtime' — OpenAI Realtime Whisper STT + gpt-4o-mini (qualità massima, ~$0.06/ora)
  */
-type TransmitMode = 'base' | 'openai' | 'realtime';
+type TransmitMode = 'voice' | 'base' | 'openai' | 'realtime';
 
 export default function BroadcasterView({ onBack }: Props) {
   const [state, setState] = useState<BroadcastState>('idle');
@@ -33,11 +35,12 @@ export default function BroadcasterView({ onBack }: Props) {
   const [showKey, setShowKey] = useState(false);
   const [showKeyInput, setShowKeyInput] = useState(false);
 
-  const broadcasterRef = useRef<BLEBroadcaster | null>(null);
-  const captureRef     = useRef<SpeechCapture | null>(null);
-  const realtimeRef    = useRef<GloboAirRealtimeClient | null>(null);
-  const translatorRef  = useRef<OpenAITranslator | null>(null);
-  const sentRef        = useRef(0);
+  const broadcasterRef  = useRef<BLEBroadcaster | null>(null);
+  const captureRef      = useRef<SpeechCapture | null>(null);
+  const audioCapRef     = useRef<AudioStreamCapture | null>(null);
+  const realtimeRef     = useRef<GloboAirRealtimeClient | null>(null);
+  const translatorRef   = useRef<OpenAITranslator | null>(null);
+  const sentRef         = useRef(0);
 
   const isLive    = state === 'live';
   const hasApiKey = apiKey.startsWith('sk-');
@@ -101,7 +104,18 @@ export default function BroadcasterView({ onBack }: Props) {
       await broadcaster.startBroadcast();
       broadcasterRef.current = broadcaster;
 
-      if (mode === 'realtime') {
+      if (mode === 'voice') {
+        // ── MODALITÀ VOCE: audio PCM diretto via BLE ─────────────────────
+        const audioCap = new AudioStreamCapture();
+        await audioCap.start(async (pcm8) => {
+          try {
+            await broadcaster.sendFrame(pcm8);
+            sentRef.current++;
+            setFramesSent(sentRef.current);
+          } catch { /* ignora errori singoli */ }
+        });
+        audioCapRef.current = audioCap;
+      } else if (mode === 'realtime') {
         // ── MODALITÀ REALTIME: Whisper STT via WebSocket ─────────────────
         setRealtimeStatus('Connessione al server Realtime...');
         const rt = new GloboAirRealtimeClient(
@@ -140,11 +154,13 @@ export default function BroadcasterView({ onBack }: Props) {
   const stop = useCallback(async () => {
     setState('stopping');
     captureRef.current?.stop();
+    audioCapRef.current?.stop();
     realtimeRef.current?.disconnect();
     translatorRef.current?.destroy();
     await broadcasterRef.current?.stopBroadcast();
     broadcasterRef.current?.destroy();
     captureRef.current = null;
+    audioCapRef.current = null;
     realtimeRef.current = null;
     translatorRef.current = null;
     broadcasterRef.current = null;
@@ -158,6 +174,7 @@ export default function BroadcasterView({ onBack }: Props) {
   useEffect(() => {
     return () => {
       captureRef.current?.stop();
+      audioCapRef.current?.stop();
       realtimeRef.current?.disconnect();
       translatorRef.current?.destroy();
       broadcasterRef.current?.stopBroadcast().catch(() => {});
@@ -166,9 +183,10 @@ export default function BroadcasterView({ onBack }: Props) {
 
   // ── Badge modalità ───────────────────────────────────────────────────────
   const modeBadge = {
-    base:     { label: 'Base · Gratis',              color: 'text-gray-400' },
-    openai:   { label: 'AI · gpt-4o-mini',           color: 'text-purple-400' },
-    realtime: { label: 'Realtime · Whisper',         color: 'text-amber-400' },
+    voice:    { label: 'Voce diretta · No traduzione', color: 'text-green-400' },
+    base:     { label: 'Base · Gratis',                color: 'text-gray-400' },
+    openai:   { label: 'AI · gpt-4o-mini',             color: 'text-purple-400' },
+    realtime: { label: 'Realtime · Whisper',           color: 'text-amber-400' },
   }[mode];
 
   return (
@@ -200,6 +218,18 @@ export default function BroadcasterView({ onBack }: Props) {
             <p className="text-[11px] font-semibold text-gray-500 uppercase tracking-widest">
               Modalità traduzione
             </p>
+
+            {/* VOCE DIRETTA */}
+            <ModeCard
+              active={mode === 'voice'}
+              onClick={() => setMode('voice')}
+              icon={<Radio className="w-5 h-5" />}
+              title="Voce diretta"
+              subtitle="Audio in tempo reale · Come una telefonata · Nessuna traduzione"
+              badge="Gratis"
+              badgeColor="text-green-400"
+              iconColor="text-green-400"
+            />
 
             {/* BASE */}
             <ModeCard
