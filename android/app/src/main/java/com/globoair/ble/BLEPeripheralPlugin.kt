@@ -1,28 +1,41 @@
 package com.globoair.ble
 
+import android.Manifest
 import android.bluetooth.*
 import android.bluetooth.le.*
 import android.content.Context
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.ParcelUuid
 import android.util.Base64
+import androidx.core.app.ActivityCompat
 import com.getcapacitor.*
 import com.getcapacitor.annotation.CapacitorPlugin
+import com.getcapacitor.annotation.Permission
+import com.getcapacitor.annotation.PermissionCallback
 import java.util.UUID
 
-/**
- * BLEPeripheralPlugin — Android BluetoothLeAdvertiser + GattServer
- *
- * Permette al telefono del broadcaster di agire come GATT Peripheral:
- *   - BluetoothLeAdvertiser: rende il telefono visibile agli scanner
- *   - BluetoothGattServer: serve la Audio Characteristic con Notify
- *
- * Permissions in AndroidManifest.xml:
- *   BLUETOOTH_ADVERTISE (API 31+)
- *   BLUETOOTH_CONNECT   (API 31+)
- *   BLUETOOTH_SCAN      (API 31+)
- *   ACCESS_FINE_LOCATION (API < 31)
- */
-@CapacitorPlugin(name = "BLEPeripheral")
+@CapacitorPlugin(
+    name = "BLEPeripheral",
+    permissions = [
+        Permission(
+            alias = "bluetooth",
+            strings = [
+                Manifest.permission.BLUETOOTH_ADVERTISE,
+                Manifest.permission.BLUETOOTH_CONNECT,
+                Manifest.permission.BLUETOOTH_SCAN,
+            ]
+        ),
+        Permission(
+            alias = "location",
+            strings = [Manifest.permission.ACCESS_FINE_LOCATION]
+        ),
+        Permission(
+            alias = "microphone",
+            strings = [Manifest.permission.RECORD_AUDIO]
+        ),
+    ]
+)
 class BLEPeripheralPlugin : Plugin() {
 
     companion object {
@@ -38,72 +51,147 @@ class BLEPeripheralPlugin : Plugin() {
     private var audioCharacteristic: BluetoothGattCharacteristic? = null
     private val subscribedDevices = mutableSetOf<BluetoothDevice>()
 
-    // ─── Plugin methods ───────────────────────────────────────────────────────
+    // Saved call per il callback dopo permessi
+    private var pendingStartCall: PluginCall? = null
+
+    // ─── initialize ──────────────────────────────────────────────────────────
 
     @PluginMethod
     fun initialize(call: PluginCall) {
         bluetoothManager = context.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
         bluetoothAdapter = bluetoothManager?.adapter
         if (bluetoothAdapter == null) {
-            call.reject("Bluetooth non disponibile")
+            call.reject("Bluetooth non disponibile su questo dispositivo")
+            return
+        }
+        if (!bluetoothAdapter!!.isEnabled) {
+            call.reject("Bluetooth spento — attivalo dalle impostazioni")
             return
         }
         call.resolve()
     }
 
+    // ─── startAdvertising — richiede permessi, poi avvia ─────────────────────
+
     @PluginMethod
     fun startAdvertising(call: PluginCall) {
-        val adapter = bluetoothAdapter ?: return call.reject("Non inizializzato")
+        val adapter = bluetoothAdapter ?: return call.reject("Non inizializzato — chiama initialize() prima")
         if (!adapter.isEnabled) return call.reject("Bluetooth spento")
 
-        _startGattServer()
+        // Su Android 12+ le permission BLE vanno richieste a runtime
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            val needAdvertise = ActivityCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_ADVERTISE) != PackageManager.PERMISSION_GRANTED
+            val needConnect   = ActivityCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_CONNECT)   != PackageManager.PERMISSION_GRANTED
 
-        advertiser = adapter.bluetoothLeAdvertiser
-        val settings = AdvertiseSettings.Builder()
-            .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_LOW_LATENCY)
-            .setTxPowerLevel(AdvertiseSettings.ADVERTISE_TX_POWER_HIGH)
-            .setConnectable(true)
-            .build()
+            if (needAdvertise || needConnect) {
+                pendingStartCall = call
+                requestPermissionForAlias("bluetooth", call, "bluetoothPermissionCallback")
+                return
+            }
+        } else {
+            // API < 31: serve ACCESS_FINE_LOCATION
+            val needLocation = ActivityCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED
+            if (needLocation) {
+                pendingStartCall = call
+                requestPermissionForAlias("location", call, "bluetoothPermissionCallback")
+                return
+            }
+        }
 
-        val data = AdvertiseData.Builder()
-            .addServiceUuid(ParcelUuid(SERVICE_UUID))
-            .setIncludeDeviceName(true)
-            .build()
-
-        advertiser?.startAdvertising(settings, data, advertiseCallback)
-        call.resolve()
+        // Tutte le permission ok — avvia
+        _doStartAdvertising(call)
     }
+
+    @PermissionCallback
+    private fun bluetoothPermissionCallback(call: PluginCall) {
+        val permCall = pendingStartCall ?: call
+        pendingStartCall = null
+
+        // Verifica che le permission siano state concesse
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            val granted = ActivityCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_ADVERTISE) == PackageManager.PERMISSION_GRANTED &&
+                          ActivityCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_CONNECT)   == PackageManager.PERMISSION_GRANTED
+            if (!granted) {
+                permCall.reject("Permessi Bluetooth negati — abilita Bluetooth nelle impostazioni dell'app")
+                return
+            }
+        }
+
+        _doStartAdvertising(permCall)
+    }
+
+    private fun _doStartAdvertising(call: PluginCall) {
+        try {
+            _startGattServer()
+
+            advertiser = bluetoothAdapter?.bluetoothLeAdvertiser
+            if (advertiser == null) {
+                call.reject("BLE advertising non supportato su questo dispositivo")
+                return
+            }
+
+            val settings = AdvertiseSettings.Builder()
+                .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_LOW_LATENCY)
+                .setTxPowerLevel(AdvertiseSettings.ADVERTISE_TX_POWER_HIGH)
+                .setConnectable(true)
+                .build()
+
+            val data = AdvertiseData.Builder()
+                .addServiceUuid(ParcelUuid(SERVICE_UUID))
+                .setIncludeDeviceName(true)
+                .build()
+
+            advertiser?.startAdvertising(settings, data, advertiseCallback)
+            call.resolve()
+        } catch (e: SecurityException) {
+            call.reject("Permesso Bluetooth negato: ${e.message}")
+        } catch (e: Exception) {
+            call.reject("Errore avvio advertising: ${e.message}")
+        }
+    }
+
+    // ─── stopAdvertising ─────────────────────────────────────────────────────
 
     @PluginMethod
     fun stopAdvertising(call: PluginCall) {
-        advertiser?.stopAdvertising(advertiseCallback)
+        try {
+            advertiser?.stopAdvertising(advertiseCallback)
+        } catch (e: SecurityException) { /* ignora */ }
         gattServer?.close()
         gattServer = null
         subscribedDevices.clear()
         call.resolve()
     }
 
+    // ─── sendNotification ────────────────────────────────────────────────────
+
     @PluginMethod
     fun sendNotification(call: PluginCall) {
         val valueB64 = call.getString("value") ?: return call.reject("Valore mancante")
         val data = Base64.decode(valueB64, Base64.DEFAULT)
-        val char = audioCharacteristic ?: return call.reject("Server non avviato")
+        val char = audioCharacteristic ?: return call.reject("Server GATT non avviato")
 
         char.value = data
         var allSent = true
-        for (device in subscribedDevices) {
-            val sent = gattServer?.notifyCharacteristicChanged(device, char, false) ?: false
-            if (sent != true) allSent = false
+        for (device in subscribedDevices.toList()) {
+            try {
+                val sent = gattServer?.notifyCharacteristicChanged(device, char, false)
+                if (sent != true) allSent = false
+            } catch (e: SecurityException) {
+                allSent = false
+            }
         }
         call.resolve(JSObject().put("sent", allSent))
     }
+
+    // ─── getConnectedCentralsCount ───────────────────────────────────────────
 
     @PluginMethod
     fun getConnectedCentralsCount(call: PluginCall) {
         call.resolve(JSObject().put("count", subscribedDevices.size))
     }
 
-    // ─── GATT Server ──────────────────────────────────────────────────────────
+    // ─── GATT Server interno ─────────────────────────────────────────────────
 
     private fun _startGattServer() {
         val manager = bluetoothManager ?: return
@@ -113,7 +201,6 @@ class BLEPeripheralPlugin : Plugin() {
             BluetoothGattCharacteristic.PROPERTY_NOTIFY or BluetoothGattCharacteristic.PROPERTY_READ,
             BluetoothGattCharacteristic.PERMISSION_READ
         )
-        // Descriptor per client configuration (subscribe to notifications)
         val descriptor = BluetoothGattDescriptor(
             CLIENT_CONFIG_UUID,
             BluetoothGattDescriptor.PERMISSION_READ or BluetoothGattDescriptor.PERMISSION_WRITE
@@ -129,6 +216,7 @@ class BLEPeripheralPlugin : Plugin() {
     }
 
     private val gattServerCallback = object : BluetoothGattServerCallback() {
+
         override fun onDescriptorWriteRequest(
             device: BluetoothDevice, requestId: Int,
             descriptor: BluetoothGattDescriptor, preparedWrite: Boolean,
@@ -147,7 +235,9 @@ class BLEPeripheralPlugin : Plugin() {
                         .put("count", subscribedDevices.size))
                 }
                 if (responseNeeded) {
-                    gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, value)
+                    try {
+                        gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, value)
+                    } catch (e: SecurityException) { /* ignora */ }
                 }
             }
         }

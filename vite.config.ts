@@ -11,6 +11,21 @@ export default defineConfig({
   },
   build: {
     target: 'esnext',
+    chunkSizeWarningLimit: 600,
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          // Separa React dal codice app
+          'react-vendor': ['react', 'react-dom'],
+          // Separa le icone Lucide (sono pesanti)
+          'lucide': ['lucide-react'],
+          // Separa il layer BLE di Capacitor
+          'capacitor-ble': ['@capacitor-community/bluetooth-le'],
+          // Separa il core Capacitor
+          'capacitor-core': ['@capacitor/core'],
+        },
+      },
+    },
   },
   // Needed for AudioWorklet
   optimizeDeps: {
