@@ -25,6 +25,9 @@ import {
 export interface BLEPeripheralPlugin {
   initialize(): Promise<void>;
   requestMicPermission(): Promise<{ granted: boolean }>;
+  startAudioCapture(): Promise<void>;
+  stopAudioCapture(): Promise<void>;
+  addListener(event: 'audioChunk', cb: (data: { data: string }) => void): Promise<{ remove: () => void }>;
   startAdvertising(options: { serviceUuid: string; localName: string }): Promise<void>;
   stopAdvertising(): Promise<void>;
   sendNotification(options: {

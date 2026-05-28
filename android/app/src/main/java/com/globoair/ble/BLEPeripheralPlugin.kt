@@ -5,6 +5,9 @@ import android.bluetooth.*
 import android.bluetooth.le.*
 import android.content.Context
 import android.content.pm.PackageManager
+import android.media.AudioFormat
+import android.media.AudioRecord
+import android.media.MediaRecorder
 import android.os.Build
 import android.os.ParcelUuid
 import android.util.Base64
@@ -51,6 +54,11 @@ class BLEPeripheralPlugin : Plugin() {
     private var audioCharacteristic: BluetoothGattCharacteristic? = null
     private val subscribedDevices = mutableSetOf<BluetoothDevice>()
 
+    // Audio capture nativo
+    private var audioRecord: AudioRecord? = null
+    private var audioThread: Thread? = null
+    @Volatile private var isAudioCapturing = false
+
     // Saved call per il callback dopo permessi
     private var pendingStartCall: PluginCall? = null
 
@@ -94,6 +102,71 @@ class BLEPeripheralPlugin : Plugin() {
         } else {
             call.reject("Permesso microfono negato")
         }
+    }
+
+    // ─── startAudioCapture ───────────────────────────────────────────────────
+    // Cattura audio nativo (AudioRecord) e manda chunk PCM8 via evento "audioChunk"
+
+    @PluginMethod
+    fun startAudioCapture(call: PluginCall) {
+        if (ActivityCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            call.reject("Permesso microfono non concesso")
+            return
+        }
+        if (isAudioCapturing) {
+            call.resolve()
+            return
+        }
+
+        val sampleRate = 8000
+        val channelConfig = AudioFormat.CHANNEL_IN_MONO
+        val audioFormat = AudioFormat.ENCODING_PCM_8BIT
+        val bufferSize = maxOf(
+            AudioRecord.getMinBufferSize(sampleRate, channelConfig, audioFormat),
+            1024
+        )
+
+        try {
+            audioRecord = AudioRecord(
+                MediaRecorder.AudioSource.MIC,
+                sampleRate, channelConfig, audioFormat, bufferSize
+            )
+            if (audioRecord?.state != AudioRecord.STATE_INITIALIZED) {
+                call.reject("AudioRecord non inizializzato")
+                return
+            }
+
+            isAudioCapturing = true
+            audioRecord!!.startRecording()
+
+            audioThread = Thread {
+                val buffer = ByteArray(bufferSize)
+                while (isAudioCapturing) {
+                    val read = audioRecord?.read(buffer, 0, bufferSize) ?: -1
+                    if (read > 0) {
+                        val chunk = buffer.copyOf(read)
+                        val b64 = Base64.encodeToString(chunk, Base64.NO_WRAP)
+                        notifyListeners("audioChunk", JSObject().put("data", b64))
+                    }
+                }
+            }
+            audioThread!!.start()
+            call.resolve()
+        } catch (e: Exception) {
+            call.reject("Errore avvio cattura audio: ${e.message}")
+        }
+    }
+
+    @PluginMethod
+    fun stopAudioCapture(call: PluginCall) {
+        isAudioCapturing = false
+        try {
+            audioRecord?.stop()
+            audioRecord?.release()
+        } catch (_: Exception) {}
+        audioRecord = null
+        audioThread = null
+        call.resolve()
     }
 
     @PluginMethod

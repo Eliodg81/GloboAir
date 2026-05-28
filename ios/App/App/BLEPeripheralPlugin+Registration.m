@@ -3,6 +3,8 @@
 CAP_PLUGIN(BLEPeripheralPlugin, "BLEPeripheral",
   CAP_PLUGIN_METHOD(initialize, CAPPluginReturnPromise);
   CAP_PLUGIN_METHOD(requestMicPermission, CAPPluginReturnPromise);
+  CAP_PLUGIN_METHOD(startAudioCapture, CAPPluginReturnPromise);
+  CAP_PLUGIN_METHOD(stopAudioCapture, CAPPluginReturnPromise);
   CAP_PLUGIN_METHOD(startAdvertising, CAPPluginReturnPromise);
   CAP_PLUGIN_METHOD(stopAdvertising, CAPPluginReturnPromise);
   CAP_PLUGIN_METHOD(sendNotification, CAPPluginReturnPromise);
