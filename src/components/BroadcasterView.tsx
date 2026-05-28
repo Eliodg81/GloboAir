@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { ArrowLeft, Radio, Square, Users, Mic, Sparkles, Eye, EyeOff, Zap } from 'lucide-react';
-import { BLEBroadcaster } from '../ble/BLEBroadcaster';
+import { BLEBroadcaster, BLEPeripheral } from '../ble/BLEBroadcaster';
 import { SpeechCapture } from '../audio/SpeechCapture';
 import { AudioStreamCapture } from '../audio/AudioStreamCapture';
 import { OpenAITranslator } from '../audio/OpenAITranslator';
@@ -28,6 +28,7 @@ export default function BroadcasterView({ onBack }: Props) {
   const [sourceLang, setSourceLang] = useState('it');
   const [liveText, setLiveText] = useState('');
   const [realtimeStatus, setRealtimeStatus] = useState('');
+  const [micActive, setMicActive] = useState(false); // true quando SpeechRecognition è in ascolto
 
   // Modalità
   const [mode, setMode] = useState<TransmitMode>('base');
@@ -139,10 +140,27 @@ export default function BroadcasterView({ onBack }: Props) {
         realtimeRef.current = rt;
       } else {
         // ── MODALITÀ BASE / OPENAI: SpeechRecognition nativo ─────────────
+        // Richiedi permesso microfono prima (necessario su Android a runtime)
+        try {
+          const { granted } = await BLEPeripheral.requestMicPermission();
+          if (!granted) throw new Error('Permesso microfono negato — abilitalo in Impostazioni → GloboAir');
+        } catch (e: unknown) {
+          const msg = e instanceof Error ? e.message : String(e);
+          // Su browser/web il metodo potrebbe non esistere — ignora
+          if (msg.includes('negato') || msg.includes('denied')) throw new Error(msg);
+        }
+
         const capture = new SpeechCapture(
           sourceLang,
           (text, isFinal) => handleTranscript(text, isFinal, broadcaster)
         );
+        capture.onError = (msg) => {
+          console.error('[BroadcasterView] SpeechCapture error:', msg);
+          setError(msg);
+          setState('error');
+        };
+        capture.onAudioStart = () => setMicActive(true);
+        capture.onAudioEnd   = () => setMicActive(false);
         await capture.start();
         captureRef.current = capture;
       }
@@ -174,6 +192,7 @@ export default function BroadcasterView({ onBack }: Props) {
     setFramesSent(0);
     setLiveText('');
     setRealtimeStatus('');
+    setMicActive(false);
     setState('idle');
   }, []);
 
@@ -393,10 +412,19 @@ export default function BroadcasterView({ onBack }: Props) {
           {isLive && (
             <div className="w-full min-h-[60px] bg-[#111] border border-[#2a2a2a] rounded-2xl px-4 py-3
                             flex items-start gap-2">
-              <Mic className={`w-4 h-4 mt-0.5 shrink-0 animate-pulse
-                              ${mode === 'realtime' ? 'text-amber-400' : 'text-red-400'}`} />
+              <div className="flex flex-col items-center gap-1 mt-0.5 shrink-0">
+                <Mic className={`w-4 h-4 animate-pulse
+                                ${mode === 'realtime' ? 'text-amber-400' : 'text-red-400'}`} />
+                {/* Indicatore mic attivo — verde = suono rilevato, grigio = silenzio */}
+                {mode !== 'voice' && (
+                  <div className={`w-2 h-2 rounded-full transition-colors
+                                  ${micActive ? 'bg-green-400 shadow-[0_0_6px_rgba(74,222,128,0.8)]' : 'bg-gray-700'}`} />
+                )}
+              </div>
               <p className="text-gray-300 text-sm leading-relaxed">
-                {liveText || <span className="text-gray-600 italic">In ascolto...</span>}
+                {liveText || <span className="text-gray-600 italic">
+                  {mode === 'voice' ? 'Audio in trasmissione...' : 'In ascolto... (parla ora)'}
+                </span>}
               </p>
             </div>
           )}

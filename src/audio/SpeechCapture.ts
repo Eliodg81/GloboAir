@@ -18,6 +18,9 @@ export class SpeechCapture {
   private onTranscript: OnTranscriptCallback;
   private sourceLang: string;
   public isCapturing = false;
+  public onError?: (msg: string) => void;
+  public onAudioStart?: () => void;
+  public onAudioEnd?: () => void;
 
   constructor(sourceLang: string, onTranscript: OnTranscriptCallback) {
     this.sourceLang = sourceLang;
@@ -37,6 +40,9 @@ export class SpeechCapture {
     this.recognition.continuous = true;
     this.recognition.interimResults = true;
     this.recognition.maxAlternatives = 1;
+
+    this.recognition.onaudiostart = () => { if (this.onAudioStart) this.onAudioStart(); };
+    this.recognition.onaudioend   = () => { if (this.onAudioEnd) this.onAudioEnd(); };
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     this.recognition.onresult = (event: any) => {
@@ -62,7 +68,24 @@ export class SpeechCapture {
     this.recognition.onerror = (event: any) => {
       console.error('[SpeechCapture] error:', event.error);
       if (event.error === 'no-speech') return; // normale, ignora
-      if (event.error !== 'aborted') this._restart();
+      if (event.error === 'aborted') return;   // stop() intenzionale
+      // Errori fatali: non riavviare, propaga l'errore
+      if (event.error === 'not-allowed' || event.error === 'audio-capture') {
+        this.isCapturing = false;
+        if (this.onError) this.onError(
+          event.error === 'not-allowed'
+            ? 'Permesso microfono negato — vai in Impostazioni e abilita il microfono per GloboAir'
+            : 'Impossibile accedere al microfono — controlla che non sia usato da un\'altra app'
+        );
+        return;
+      }
+      if (event.error === 'service-not-available') {
+        this.isCapturing = false;
+        if (this.onError) this.onError('Servizio riconoscimento vocale non disponibile — verifica la connessione internet');
+        return;
+      }
+      // Altri errori transitori: riavvia
+      this._restart();
     };
 
     this.recognition.onend = () => {
