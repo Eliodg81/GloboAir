@@ -1,0 +1,24 @@
+{
+	"appId": "com.globoup.globoair",
+	"appName": "GloboAir",
+	"webDir": "dist",
+	"plugins": {
+		"BluetoothLe": {
+			"displayStrings": {
+				"scanning": "Ricerca sessioni GloboAir...",
+				"cancel": "Annulla",
+				"availableDevices": "Sessioni disponibili",
+				"noDeviceFound": "Nessuna sessione trovata"
+			}
+		}
+	},
+	"ios": {
+		"contentInset": "always"
+	},
+	"packageClassList": [
+		"BluetoothLe",
+		"AppPlugin",
+		"HapticsPlugin",
+		"BLEPeripheralPlugin"
+	]
+}
