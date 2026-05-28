@@ -54,6 +54,11 @@ export default function ModeSelect({ onSelect }: Props) {
       <p className="text-xs text-gray-600 text-center">
         Nessun internet richiesto · Solo Bluetooth
       </p>
+
+      {/* Versione — aggiornala ad ogni build per confermare l'aggiornamento */}
+      <p className="text-[10px] text-gray-700 text-center font-mono">
+        v1.3 · 28 Mag 2026
+      </p>
     </div>
   );
 }
