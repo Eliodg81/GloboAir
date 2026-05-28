@@ -59,6 +59,15 @@ export default function ReceiverView({ onBack }: Props) {
     setSessions([]);
     setError('');
 
+    // Inizializza player SUBITO (gesto utente diretto — richiesto da iOS AudioContext)
+    try {
+      const ap = new AudioStreamPlayer();
+      await ap.initialize();
+      audioPlayerRef.current = ap;
+    } catch (e) {
+      console.warn('[AudioStreamPlayer] init error:', e);
+    }
+
     try {
       const receiver = new BLEReceiver();
       receiver.targetLang = targetLangRef.current;
