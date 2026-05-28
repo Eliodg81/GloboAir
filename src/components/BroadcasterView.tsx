@@ -114,10 +114,12 @@ export default function BroadcasterView({ onBack }: Props) {
         // ── MODALITÀ VOCE: audio PCM diretto via BLE ─────────────────────
         const audioCap = new AudioStreamCapture();
         await audioCap.start(async (pcm8) => {
+          // Conta sempre i chunk catturati (anche senza receiver connesso)
+          sentRef.current++;
+          setFramesSent(sentRef.current);
+          setMicActive(true);
           try {
             await broadcaster.sendFrame(pcm8);
-            sentRef.current++;
-            setFramesSent(sentRef.current);
           } catch { /* ignora errori singoli */ }
         });
         audioCapRef.current = audioCap;
@@ -414,18 +416,27 @@ export default function BroadcasterView({ onBack }: Props) {
                             flex items-start gap-2">
               <div className="flex flex-col items-center gap-1 mt-0.5 shrink-0">
                 <Mic className={`w-4 h-4 animate-pulse
-                                ${mode === 'realtime' ? 'text-amber-400' : 'text-red-400'}`} />
-                {/* Indicatore mic attivo — verde = suono rilevato, grigio = silenzio */}
-                {mode !== 'voice' && (
-                  <div className={`w-2 h-2 rounded-full transition-colors
-                                  ${micActive ? 'bg-green-400 shadow-[0_0_6px_rgba(74,222,128,0.8)]' : 'bg-gray-700'}`} />
+                                ${mode === 'voice' ? 'text-green-400' : mode === 'realtime' ? 'text-amber-400' : 'text-red-400'}`} />
+                {/* Indicatore mic attivo — verde = audio rilevato, grigio = silenzio */}
+                <div className={`w-2 h-2 rounded-full transition-colors
+                                ${micActive ? 'bg-green-400 shadow-[0_0_6px_rgba(74,222,128,0.8)]' : 'bg-gray-700'}`} />
+              </div>
+              <div className="flex-1">
+                <p className="text-gray-300 text-sm leading-relaxed">
+                  {mode === 'voice'
+                    ? <span className={micActive ? 'text-green-400' : 'text-gray-600 italic'}>
+                        {micActive ? `🎙️ Mic attivo · ${framesSent} chunk inviati` : 'In attesa del microfono...'}
+                      </span>
+                    : liveText || <span className="text-gray-600 italic">In ascolto... (parla ora)</span>
+                  }
+                </p>
+                {mode === 'voice' && listeners === 0 && (
+                  <p className="text-yellow-500/70 text-xs mt-1">⚠ Nessun ascoltatore connesso</p>
+                )}
+                {mode === 'voice' && listeners > 0 && (
+                  <p className="text-green-500/70 text-xs mt-1">✓ {listeners} ascoltatore{listeners > 1 ? 'i' : ''} connesso{listeners > 1 ? 'i' : ''}</p>
                 )}
               </div>
-              <p className="text-gray-300 text-sm leading-relaxed">
-                {liveText || <span className="text-gray-600 italic">
-                  {mode === 'voice' ? 'Audio in trasmissione...' : 'In ascolto... (parla ora)'}
-                </span>}
-              </p>
             </div>
           )}
         </div>
