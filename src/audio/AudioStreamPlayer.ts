@@ -2,15 +2,19 @@
  * AudioStreamPlayer — riproduce chunk PCM 8kHz 8-bit in tempo reale
  *
  * Gestisce:
- * - iOS WKWebView: AudioContext sospeso → resume() obbligatorio
+ * - iOS WKWebView: AudioContext sospeso → resume() obbligatorio (atteso)
  * - Sample rate nativo variabile (44100/48000 Hz) → upsampling da 8kHz
  * - Buffer-ahead di 80ms per compensare il jitter BLE
+ * - Coda interna: se il context è sospeso, i chunk vengono accodati
+ *   e riprodotti non appena il context si risveglia
  */
 export class AudioStreamPlayer {
   private context: AudioContext | null = null;
   private nextPlayTime = 0;
   private started = false;
   private actualRate = 44100;
+  private pendingChunks: Uint8Array[] = [];
+  private resuming = false;
 
   private readonly SOURCE_RATE = 8000;   // rate in cui arriva il PCM dal broadcaster
   private readonly BUFFER_AHEAD = 0.08;  // 80ms di anticipo per il jitter BLE
@@ -27,16 +31,34 @@ export class AudioStreamPlayer {
 
     this.nextPlayTime = 0;
     this.started = false;
-    console.log(`[AudioStreamPlayer] initialized at ${this.actualRate}Hz`);
+    console.log(`[AudioStreamPlayer] initialized at ${this.actualRate}Hz, state=${this.context.state}`);
   }
 
   playChunk(pcm8: Uint8Array): void {
     if (!this.context || pcm8.length === 0) return;
 
-    // Resume se sospeso (può succedere su iOS dopo interrupt)
     if (this.context.state === 'suspended') {
-      this.context.resume();
+      // Accoda il chunk e avvia resume()
+      this.pendingChunks.push(pcm8);
+      if (!this.resuming) {
+        this.resuming = true;
+        this.context.resume().then(() => {
+          this.resuming = false;
+          // Riproduci tutti i chunk accodati
+          const toPlay = this.pendingChunks.splice(0);
+          for (const chunk of toPlay) {
+            this._doPlay(chunk);
+          }
+        }).catch(() => { this.resuming = false; });
+      }
+      return;
     }
+
+    this._doPlay(pcm8);
+  }
+
+  private _doPlay(pcm8: Uint8Array): void {
+    if (!this.context || pcm8.length === 0) return;
 
     // Upsampling da SOURCE_RATE (8kHz) → actualRate (44100/48000)
     const ratio = this.actualRate / this.SOURCE_RATE;
@@ -72,5 +94,7 @@ export class AudioStreamPlayer {
     this.context = null;
     this.nextPlayTime = 0;
     this.started = false;
+    this.pendingChunks = [];
+    this.resuming = false;
   }
 }

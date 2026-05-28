@@ -15,7 +15,7 @@ import {
   decodeChunk,
   decodeTextFrame,
   FrameReassembler,
-  FLAG_TEXT,
+  TEXT_PACKET_TYPE,
   TEXT_FRAME_HEADER_SIZE,
   LANG_BROADCAST,
   langToCode,
@@ -50,6 +50,9 @@ export class BLEReceiver {
    * @param isPreTranslated  true = testo già tradotto nella lingua del receiver (broadcaster ha pagato)
    */
   public onText?: (text: string, isFinal: boolean, isPreTranslated: boolean) => void;
+
+  /** Chiamato per ogni notifica BLE raw ricevuta — usato per diagnostica */
+  public onRawPacket?: () => void;
 
   /** Lingua preferita del receiver — usata per filtrare i pacchetti con tag lingua */
   public targetLang = 'en';
@@ -123,9 +126,10 @@ export class BLEReceiver {
         (value: DataView) => {
           try {
             const raw = new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+            this.onRawPacket?.(); // contatore diagnostico
 
-            // v0.2: discrimina frame testo vs frame audio tramite FLAG_TEXT
-            if (raw.length >= TEXT_FRAME_HEADER_SIZE && (raw[2] & FLAG_TEXT) !== 0) {
+            // v0.3: primo byte = tipo pacchetto (0xA1=testo, 0xA0=audio)
+            if (raw.length >= TEXT_FRAME_HEADER_SIZE && raw[0] === TEXT_PACKET_TYPE) {
               const tf = decodeTextFrame(raw);
 
               if (tf.langCode === LANG_BROADCAST) {

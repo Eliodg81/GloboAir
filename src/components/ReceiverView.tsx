@@ -17,6 +17,7 @@ export default function ReceiverView({ onBack }: Props) {
   const [receiveMode, setReceiveMode] = useState<ReceiveMode>('translation');
   const [sessions, setSessions] = useState<BroadcastSession[]>([]);
   const [framesReceived, setFramesReceived] = useState(0);
+  const [rawPackets, setRawPackets] = useState(0);
   const [error, setError] = useState('');
   const [targetLang, setTargetLang] = useState('en');
   const [originalText, setOriginalText] = useState('');
@@ -78,6 +79,7 @@ export default function ReceiverView({ onBack }: Props) {
       await receiver.initialize();
       receiverRef.current = receiver;
 
+      receiver.onRawPacket = () => setRawPackets(r => r + 1);
       receiver.onStateChange = (s) => {
         if (s === 'error') setViewState('error');
         if (s === 'connected') {
@@ -192,6 +194,7 @@ export default function ReceiverView({ onBack }: Props) {
     audioPlayerRef.current = null;
     setSessions([]);
     setFramesReceived(0);
+    setRawPackets(0);
     setOriginalText('');
     setTranslatedText('');
     setViewState('idle');
@@ -445,7 +448,10 @@ export default function ReceiverView({ onBack }: Props) {
                     <p className="text-green-400 font-semibold text-lg">Voce diretta</p>
                     <p className="text-gray-500 text-sm mt-0.5">🎙️ Audio in tempo reale</p>
                   </div>
-                  <StatCard label="Pacchetti audio ricevuti" value={framesReceived.toString()} />
+                  <div className="w-full flex gap-2">
+                    <StatCard label="BLE notifiche" value={rawPackets.toString()} />
+                    <StatCard label="Frame audio" value={framesReceived.toString()} />
+                  </div>
                 </>
               ) : (
                 /* ── CON TRADUZIONE ── */
@@ -498,7 +504,10 @@ export default function ReceiverView({ onBack }: Props) {
                       )}
                     </div>
                   )}
-                  <StatCard label="Frasi ricevute" value={framesReceived.toString()} />
+                  <div className="w-full flex gap-2">
+                    <StatCard label="BLE notifiche" value={rawPackets.toString()} />
+                    <StatCard label="Frasi ricevute" value={framesReceived.toString()} />
+                  </div>
                 </>
               )}
 
