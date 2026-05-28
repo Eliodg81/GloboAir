@@ -1,7 +1,8 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { ArrowLeft, Headphones, Search, Wifi, Volume2, X, Radio, Languages } from 'lucide-react';
+import { ArrowLeft, Headphones, Search, Wifi, Volume2, X, Radio, Languages, Sparkles, Eye, EyeOff } from 'lucide-react';
 import { BLEReceiver, BroadcastSession } from '../ble/BLEReceiver';
 import { TranslationEngine } from '../audio/TranslationEngine';
+import { OpenAITranslator } from '../audio/OpenAITranslator';
 import { SpeechPlayer } from '../audio/SpeechPlayer';
 import LanguagePicker from './LanguagePicker';
 
@@ -15,31 +16,50 @@ export default function ReceiverView({ onBack }: Props) {
   const [framesReceived, setFramesReceived] = useState(0);
   const [error, setError] = useState('');
   const [targetLang, setTargetLang] = useState('en');
-
-  // Testo live: originale e tradotto
   const [originalText, setOriginalText] = useState('');
   const [translatedText, setTranslatedText] = useState('');
+  const [translationMode, setTranslationMode] = useState<'free' | 'ai' | 'preTranslated'>('free');
 
-  const receiverRef    = useRef<BLEReceiver | null>(null);
-  const translatorRef  = useRef<TranslationEngine | null>(null);
-  const playerRef      = useRef<SpeechPlayer | null>(null);
-  const targetLangRef  = useRef(targetLang);
+  // Modalità OpenAI receiver-side
+  const [useOpenAI, setUseOpenAI] = useState(OpenAITranslator.hasKey('receiver'));
+  const [apiKey, setApiKey] = useState(OpenAITranslator.getStoredKey('receiver'));
+  const [showKey, setShowKey] = useState(false);
+  const [showKeyInput, setShowKeyInput] = useState(false);
 
-  // Mantieni ref aggiornata per uso nei callback BLE (chiusura stabile)
+  const receiverRef   = useRef<BLEReceiver | null>(null);
+  const myMemoryRef   = useRef<TranslationEngine | null>(null);
+  const openAIRef     = useRef<OpenAITranslator | null>(null);
+  const playerRef     = useRef<SpeechPlayer | null>(null);
+  const targetLangRef = useRef(targetLang);
+  const useOpenAIRef  = useRef(useOpenAI);
+  const apiKeyRef     = useRef(apiKey);
+
+  // Mantieni ref aggiornate per uso nei callback BLE
   useEffect(() => { targetLangRef.current = targetLang; }, [targetLang]);
+  useEffect(() => { useOpenAIRef.current = useOpenAI; }, [useOpenAI]);
+  useEffect(() => { apiKeyRef.current = apiKey; }, [apiKey]);
 
-  // Aggiorna translator e player quando cambia la lingua target
+  // Aggiorna player lingua se cambia targetLang durante ascolto
   useEffect(() => {
-    translatorRef.current?.update('__src__', targetLang); // src aggiornato nel callback
     playerRef.current?.updateTargetLang(targetLang);
+    myMemoryRef.current?.update('', targetLang);
   }, [targetLang]);
+
+  const saveApiKey = (key: string) => {
+    setApiKey(key);
+    OpenAITranslator.saveKey('receiver', key);
+  };
+
+  const hasApiKey = apiKey.startsWith('sk-');
 
   const startScan = useCallback(async () => {
     setViewState('scanning');
     setSessions([]);
     setError('');
+
     try {
       const receiver = new BLEReceiver();
+      receiver.targetLang = targetLangRef.current;
       await receiver.initialize();
       receiverRef.current = receiver;
 
@@ -54,29 +74,42 @@ export default function ReceiverView({ onBack }: Props) {
         );
       };
 
-      // ── v0.2: pipeline testo → traduzione → TTS ──
-      receiver.onText = async (text, isFinal) => {
+      // ── Pipeline testo → traduzione → TTS ────────────────────────────────
+      receiver.onText = async (text, isFinal, isPreTranslated) => {
         setFramesReceived(r => r + 1);
+        setOriginalText(isPreTranslated ? '' : text); // se già tradotto non mostrare l'originale
 
-        // Mostra il testo originale (parziale o finale)
-        setOriginalText(text);
-
-        if (!isFinal) return; // per i risultati parziali mostriamo solo il testo grezzo
+        if (!isFinal) return; // mostra testo ma non parla finché non è finale
 
         try {
-          const engine = translatorRef.current;
-          if (!engine) return;
-          const translated = await engine.translate(text);
-          setTranslatedText(translated);
+          let translated: string;
 
-          // Leggi ad alta voce solo le frasi finali
+          if (isPreTranslated) {
+            // ✅ BROADCASTER HA GIÀ TRADOTTO (lui ha pagato OpenAI)
+            translated = text;
+            setTranslationMode('preTranslated');
+            setTranslatedText(translated);
+          } else if (useOpenAIRef.current && apiKeyRef.current.startsWith('sk-')) {
+            // ✅ RECEIVER USA OPENAI (paga lui)
+            if (!openAIRef.current) {
+              openAIRef.current = new OpenAITranslator(apiKeyRef.current);
+            }
+            // sourceLang unknown → usiamo 'auto' come convenzione (OpenAI lo capisce dal contesto)
+            translated = await openAIRef.current.translate(text, 'auto', targetLangRef.current);
+            setTranslationMode('ai');
+            setTranslatedText(translated);
+          } else {
+            // ✅ TRADUZIONE GRATUITA (MyMemory)
+            if (!myMemoryRef.current) {
+              myMemoryRef.current = new TranslationEngine('it', targetLangRef.current);
+            }
+            translated = await myMemoryRef.current.translate(text);
+            setTranslationMode('free');
+            setTranslatedText(translated);
+          }
+
           playerRef.current?.speak(translated);
-
-          // Reset dopo un po'
-          setTimeout(() => {
-            setOriginalText('');
-            setTranslatedText('');
-          }, 3000);
+          setTimeout(() => { setOriginalText(''); setTranslatedText(''); }, 3500);
         } catch (e) {
           console.warn('[ReceiverView] translate/speak error:', e);
         }
@@ -92,25 +125,29 @@ export default function ReceiverView({ onBack }: Props) {
   const connect = useCallback(async (session: BroadcastSession) => {
     setViewState('connecting');
     try {
-      // Crea TranslationEngine (source lang unknown at connect time — aggiornato dinamicamente)
-      translatorRef.current = new TranslationEngine('it', targetLangRef.current);
-      // Crea SpeechPlayer
+      if (receiverRef.current) {
+        receiverRef.current.targetLang = targetLangRef.current;
+      }
+      myMemoryRef.current = new TranslationEngine('it', targetLangRef.current);
+      if (useOpenAI && hasApiKey) {
+        openAIRef.current = new OpenAITranslator(apiKey);
+      }
       playerRef.current = new SpeechPlayer(targetLangRef.current);
-
       await receiverRef.current?.connect(session);
-      // onStateChange → 'connected' → setViewState('listening')
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Connessione fallita');
       setViewState('error');
     }
-  }, []);
+  }, [useOpenAI, hasApiKey, apiKey]);
 
   const stopAll = useCallback(async () => {
     playerRef.current?.stop();
-    translatorRef.current?.destroy();
+    myMemoryRef.current?.destroy();
+    openAIRef.current?.destroy();
     await receiverRef.current?.disconnect();
     receiverRef.current = null;
-    translatorRef.current = null;
+    myMemoryRef.current = null;
+    openAIRef.current = null;
     playerRef.current = null;
     setSessions([]);
     setFramesReceived(0);
@@ -122,7 +159,8 @@ export default function ReceiverView({ onBack }: Props) {
   useEffect(() => {
     return () => {
       playerRef.current?.stop();
-      translatorRef.current?.destroy();
+      myMemoryRef.current?.destroy();
+      openAIRef.current?.destroy();
       receiverRef.current?.disconnect().catch(() => {});
     };
   }, []);
@@ -145,20 +183,92 @@ export default function ReceiverView({ onBack }: Props) {
         )}
       </div>
 
-      <div className="flex-1 flex flex-col items-center justify-between px-6 py-4">
+      <div className="flex-1 flex flex-col items-center justify-between px-6 py-4 gap-4">
 
         {/* Language selector */}
         <div className="w-full max-w-xs relative">
           <LanguagePicker
             label="Voglio ascoltare in"
             value={targetLang}
-            onChange={setTargetLang}
+            onChange={(lang) => {
+              setTargetLang(lang);
+              if (receiverRef.current) receiverRef.current.targetLang = lang;
+            }}
             disabled={isListening}
           />
         </div>
 
+        {/* ── OpenAI Toggle (solo quando non in ascolto) ── */}
+        {!isListening && (
+          <div className="w-full max-w-xs">
+            <button
+              onClick={() => {
+                const next = !useOpenAI;
+                setUseOpenAI(next);
+                if (next && !hasApiKey) setShowKeyInput(true);
+              }}
+              className={`w-full flex items-center justify-between px-4 py-3 rounded-2xl border transition-all
+                          ${useOpenAI && hasApiKey
+                            ? 'bg-purple-500/10 border-purple-500/40'
+                            : 'bg-[#1a1a1a] border-[#2a2a2a]'}`}
+            >
+              <div className="flex items-center gap-3">
+                <Sparkles className={`w-5 h-5 ${useOpenAI && hasApiKey ? 'text-purple-400' : 'text-gray-500'}`} />
+                <div className="text-left">
+                  <p className={`text-sm font-semibold ${useOpenAI && hasApiKey ? 'text-purple-300' : 'text-gray-300'}`}>
+                    Traduzione Premium (OpenAI)
+                  </p>
+                  <p className="text-xs text-gray-600">
+                    {useOpenAI && hasApiKey ? 'Qualità massima · Pago io' : 'Usa MyMemory (gratis)'}
+                  </p>
+                </div>
+              </div>
+              <div className={`w-11 h-6 rounded-full transition-colors relative
+                              ${useOpenAI && hasApiKey ? 'bg-purple-500' : 'bg-gray-700'}`}>
+                <div className={`absolute top-0.5 w-5 h-5 bg-white rounded-full shadow transition-transform
+                                ${useOpenAI && hasApiKey ? 'translate-x-5' : 'translate-x-0.5'}`} />
+              </div>
+            </button>
+
+            {useOpenAI && (
+              <div className="mt-2">
+                <button
+                  onClick={() => setShowKeyInput(v => !v)}
+                  className="text-xs text-gray-500 hover:text-gray-300 transition-colors mb-1.5"
+                >
+                  {showKeyInput ? '▲ Nascondi chiave API' : '▼ Imposta chiave API OpenAI'}
+                </button>
+                {showKeyInput && (
+                  <div className="relative">
+                    <input
+                      type={showKey ? 'text' : 'password'}
+                      value={apiKey}
+                      onChange={e => saveApiKey(e.target.value)}
+                      placeholder="sk-..."
+                      className="w-full bg-[#111] border border-[#2a2a2a] rounded-xl px-3 py-2.5
+                                 text-white text-sm font-mono placeholder-gray-600 focus:outline-none
+                                 focus:border-purple-500/50 pr-10"
+                    />
+                    <button
+                      onClick={() => setShowKey(v => !v)}
+                      className="absolute right-2.5 top-2.5 text-gray-600 hover:text-gray-400"
+                    >
+                      {showKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                    </button>
+                  </div>
+                )}
+                {useOpenAI && !hasApiKey && (
+                  <p className="text-xs text-yellow-500/80 mt-1.5">
+                    ⚠ Inserisci la chiave API per la traduzione premium
+                  </p>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
         {/* Main content per stato */}
-        <div className="flex flex-col items-center gap-6 w-full max-w-xs">
+        <div className="flex flex-col items-center gap-5 w-full max-w-xs">
 
           {/* IDLE */}
           {viewState === 'idle' && (
@@ -188,7 +298,6 @@ export default function ReceiverView({ onBack }: Props) {
                 </div>
               </div>
               <p className="text-gray-300">Ricerca sessioni in corso...</p>
-
               {sessions.length === 0
                 ? <p className="text-xs text-gray-600">Avvicina il telefono al broadcaster</p>
                 : (
@@ -225,26 +334,38 @@ export default function ReceiverView({ onBack }: Props) {
 
               <div className="text-center">
                 <p className="text-blue-400 font-semibold text-lg">In ascolto</p>
-                <p className="text-gray-500 text-sm mt-0.5">Traduzione automatica attiva</p>
+                <p className="text-gray-500 text-sm mt-0.5">
+                  {translationMode === 'preTranslated' && '✨ Tradotto dalla guida'}
+                  {translationMode === 'ai'            && '🤖 Traduzione AI (OpenAI)'}
+                  {translationMode === 'free'          && '🌐 Traduzione gratuita'}
+                </p>
               </div>
 
-              {/* Live translation display */}
+              {/* Live translation */}
               {(originalText || translatedText) && (
                 <div className="w-full flex flex-col gap-2">
-                  {/* Testo originale (guida) */}
                   {originalText && (
                     <div className="bg-[#111] border border-[#2a2a2a] rounded-2xl px-4 py-3">
                       <p className="text-[10px] text-gray-600 uppercase tracking-widest mb-1">Originale</p>
                       <p className="text-gray-400 text-sm leading-relaxed">{originalText}</p>
                     </div>
                   )}
-                  {/* Testo tradotto */}
                   {translatedText && (
-                    <div className="bg-blue-500/10 border border-blue-500/30 rounded-2xl px-4 py-3
-                                    flex items-start gap-2">
-                      <Languages className="w-4 h-4 text-blue-400 mt-0.5 shrink-0" />
+                    <div className={`border rounded-2xl px-4 py-3 flex items-start gap-2
+                                    ${translationMode === 'preTranslated'
+                                      ? 'bg-purple-500/10 border-purple-500/30'
+                                      : translationMode === 'ai'
+                                        ? 'bg-purple-500/10 border-purple-500/30'
+                                        : 'bg-blue-500/10 border-blue-500/30'}`}>
+                      {translationMode !== 'free'
+                        ? <Sparkles className="w-4 h-4 text-purple-400 mt-0.5 shrink-0" />
+                        : <Languages className="w-4 h-4 text-blue-400 mt-0.5 shrink-0" />
+                      }
                       <div>
-                        <p className="text-[10px] text-blue-400/70 uppercase tracking-widest mb-1">Traduzione</p>
+                        <p className={`text-[10px] uppercase tracking-widest mb-1
+                                      ${translationMode !== 'free' ? 'text-purple-400/70' : 'text-blue-400/70'}`}>
+                          Traduzione
+                        </p>
                         <p className="text-white text-sm font-medium leading-relaxed">{translatedText}</p>
                       </div>
                     </div>
@@ -253,7 +374,6 @@ export default function ReceiverView({ onBack }: Props) {
               )}
 
               <StatCard label="Frasi ricevute" value={framesReceived.toString()} />
-
               <button onClick={stopAll}
                 className="px-6 py-3 rounded-full border border-[#2a2a2a] text-gray-400
                            hover:text-white hover:border-gray-500 transition-colors text-sm">
@@ -276,9 +396,7 @@ export default function ReceiverView({ onBack }: Props) {
 
         {/* Footer */}
         <p className="text-xs text-gray-700 text-center">
-          {isListening
-            ? 'Tieni lo schermo acceso · Traduzione via internet'
-            : 'Solo Bluetooth · Traduzione via internet'}
+          {isListening ? 'Bluetooth · Traduzione via internet' : 'Solo Bluetooth'}
         </p>
       </div>
     </div>
@@ -289,8 +407,7 @@ function SessionCard({ session, onConnect }: { session: BroadcastSession; onConn
   return (
     <button onClick={onConnect}
       className="w-full bg-[#1a1a1a] border border-[#2a2a2a] rounded-2xl p-4
-                 flex items-center justify-between
-                 hover:border-blue-500/50 active:scale-95 transition-all">
+                 flex items-center justify-between hover:border-blue-500/50 active:scale-95 transition-all">
       <div className="flex items-center gap-3">
         <div className="w-10 h-10 rounded-full bg-green-500/20 flex items-center justify-center">
           <Radio className="w-5 h-5 text-green-400" />

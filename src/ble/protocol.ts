@@ -120,15 +120,41 @@ export class FrameReassembler {
 }
 
 // ─── v0.2 Text Frame ─────────────────────────────────────────────────────────
-// Formato: [seqId_hi][seqId_lo][flags: FLAG_TEXT | FLAG_TEXT_FINAL?][...utf8...]
-// Inviato sullo stesso AUDIO_CHARACTERISTIC_UUID — il receiver discrimina via FLAG_TEXT
+//
+// Formato base (broadcaster invia testo originale, receiver traduce):
+//   [seqId_hi][seqId_lo][flags][0x00][0x00][...utf8 testo originale...]
+//   lang = 0x0000 → "senza tag lingua" → ogni receiver traduce da solo
+//
+// Formato con tag lingua (broadcaster pre-traduce con OpenAI, modello "chi trasmette paga"):
+//   [seqId_hi][seqId_lo][flags][lang_hi][lang_lo][...utf8 testo già tradotto...]
+//   lang = 0x656E ('en') → questo pacchetto è già in inglese, solo i receiver en lo leggono
+//   lang = 0x6A61 ('ja') → questo pacchetto è già in giapponese, solo i receiver ja lo leggono
+//
+// Il receiver:
+//   - Se lang == 0x0000: traduce il testo con il proprio engine (MyMemory o OpenAI)
+//   - Se lang == sua_lingua: usa il testo direttamente (già tradotto dalla guida) → gratis per lui
+//   - Se lang != sua_lingua: scarta il pacchetto (non è per lui)
 
-export const TEXT_FRAME_HEADER_SIZE = 3;
+export const TEXT_FRAME_HEADER_SIZE = 5; // [seqId_hi][seqId_lo][flags][lang_hi][lang_lo]
+export const LANG_BROADCAST = 0x0000;    // nessun tag lingua — ogni receiver traduce per conto suo
 
 export interface TextFrame {
   seqId: number;    // 16-bit sequence ID
   isFinal: boolean; // true = frase completa, false = risultato parziale (interim)
+  langCode: number; // 0x0000 = originale (receiver traduce) | 0x656E = 'en' | 0x6974 = 'it' | ecc.
   text: string;
+}
+
+/** Converte un codice lingua 2 lettere (es. 'en') in un numero 16-bit (es. 0x656E) */
+export function langToCode(lang: string): number {
+  if (!lang || lang.length < 2) return LANG_BROADCAST;
+  return (lang.charCodeAt(0) << 8) | lang.charCodeAt(1);
+}
+
+/** Converte un numero 16-bit (es. 0x656E) nel codice lingua 2 lettere (es. 'en') */
+export function codeToLang(code: number): string {
+  if (code === LANG_BROADCAST) return '';
+  return String.fromCharCode((code >> 8) & 0xFF, code & 0xFF);
 }
 
 export function encodeTextFrame(frame: TextFrame): Uint8Array {
@@ -137,6 +163,8 @@ export function encodeTextFrame(frame: TextFrame): Uint8Array {
   buf[0] = (frame.seqId >> 8) & 0xFF;
   buf[1] = frame.seqId & 0xFF;
   buf[2] = FLAG_TEXT | (frame.isFinal ? FLAG_TEXT_FINAL : 0);
+  buf[3] = (frame.langCode >> 8) & 0xFF;
+  buf[4] = frame.langCode & 0xFF;
   buf.set(textBytes, TEXT_FRAME_HEADER_SIZE);
   return buf;
 }
@@ -147,6 +175,7 @@ export function decodeTextFrame(raw: Uint8Array): TextFrame {
   return {
     seqId: (raw[0] << 8) | raw[1],
     isFinal: (flags & FLAG_TEXT_FINAL) !== 0,
+    langCode: (raw[3] << 8) | raw[4],
     text: new TextDecoder('utf-8').decode(raw.slice(TEXT_FRAME_HEADER_SIZE)),
   };
 }

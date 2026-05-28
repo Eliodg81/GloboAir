@@ -17,6 +17,8 @@ import {
   FrameReassembler,
   FLAG_TEXT,
   TEXT_FRAME_HEADER_SIZE,
+  LANG_BROADCAST,
+  langToCode,
 } from './protocol';
 
 export type ReceiverState =
@@ -40,8 +42,18 @@ export class BLEReceiver {
   public onStateChange?: (state: ReceiverState) => void;
   public onSessionFound?: (session: BroadcastSession) => void;
   public onFrame?: (encoded: Uint8Array) => void;
-  /** v0.2 — chiamato quando arriva una frase trascritta dal broadcaster */
-  public onText?: (text: string, isFinal: boolean) => void;
+
+  /**
+   * v0.2 — Chiamato quando arriva un frame testo.
+   * @param text       Testo (originale se broadcaster non usa OpenAI, già tradotto se usa OpenAI)
+   * @param isFinal    true = frase completa
+   * @param isPreTranslated  true = testo già tradotto nella lingua del receiver (broadcaster ha pagato)
+   */
+  public onText?: (text: string, isFinal: boolean, isPreTranslated: boolean) => void;
+
+  /** Lingua preferita del receiver — usata per filtrare i pacchetti con tag lingua */
+  public targetLang = 'en';
+
   public framesReceived = 0;
 
   constructor() {
@@ -115,8 +127,17 @@ export class BLEReceiver {
             // v0.2: discrimina frame testo vs frame audio tramite FLAG_TEXT
             if (raw.length >= TEXT_FRAME_HEADER_SIZE && (raw[2] & FLAG_TEXT) !== 0) {
               const tf = decodeTextFrame(raw);
-              this.framesReceived++;
-              this.onText?.(tf.text, tf.isFinal);
+
+              if (tf.langCode === LANG_BROADCAST) {
+                // Testo originale — il receiver lo traduce (MyMemory o OpenAI a sue spese)
+                this.framesReceived++;
+                this.onText?.(tf.text, tf.isFinal, false);
+              } else if (tf.langCode === langToCode(this.targetLang)) {
+                // Testo già tradotto nella mia lingua dal broadcaster (OpenAI del broadcaster)
+                this.framesReceived++;
+                this.onText?.(tf.text, tf.isFinal, true /* isPreTranslated */);
+              }
+              // else: pacchetto per un'altra lingua → scarta silenziosamente
             } else {
               // v0.1 audio fallback (ADPCM)
               const chunk = decodeChunk(raw);

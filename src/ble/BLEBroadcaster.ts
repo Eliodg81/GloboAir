@@ -17,6 +17,8 @@ import {
   MAX_CHUNK_DATA,
   FLAG_FIRST_FRAME,
   encodeTextFrame,
+  langToCode,
+  LANG_BROADCAST,
 } from './protocol';
 
 // ─── Plugin nativo (Swift iOS / Kotlin Android) ───────────────────────────────
@@ -120,22 +122,64 @@ export class BLEBroadcaster {
   }
 
   /**
-   * v0.2 — Invia una frase trascritta a tutti i receiver connessi.
+   * v0.2 — MODELLO RECEIVER PAGA
+   * Invia il testo originale trascritto (senza tag lingua).
+   * Ogni receiver lo traduce per conto suo (MyMemory gratis o OpenAI a sue spese).
+   *
    * @param text     testo trascritto (UTF-8, max ~500 bytes)
    * @param isFinal  true = frase completa, false = risultato parziale
    */
   async sendText(text: string, isFinal: boolean): Promise<void> {
     if (!this.isActive || this.connectedCount === 0) return;
 
-    const frame = encodeTextFrame({ seqId: this.frameId, isFinal, text });
+    const frame = encodeTextFrame({
+      seqId: this.frameId,
+      isFinal,
+      langCode: LANG_BROADCAST, // 0x0000 = nessun tag → receiver traduce
+      text,
+    });
     this.frameId = (this.frameId + 1) & 0xFFFF;
 
-    const b64 = uint8ToBase64(frame);
     await BLEPeripheral.sendNotification({
       serviceUuid: GLOBOAIR_SERVICE_UUID,
-      characteristicUuid: AUDIO_CHARACTERISTIC_UUID, // stesso canale, flag TEXT discrimina
-      value: b64,
+      characteristicUuid: AUDIO_CHARACTERISTIC_UUID,
+      value: uint8ToBase64(frame),
     });
+  }
+
+  /**
+   * v0.2 — MODELLO BROADCASTER PAGA (OpenAI)
+   * Invia le traduzioni pre-calcolate, una per lingua.
+   * Ogni receiver riceve solo il pacchetto nella sua lingua → gratis per lui.
+   *
+   * @param translations  Map: { 'en' → 'Hello!', 'ja' → 'こんにちは！', ... }
+   * @param isFinal       true = frase completa
+   */
+  async sendTranslatedTexts(
+    translations: Map<string, string>,
+    isFinal: boolean
+  ): Promise<void> {
+    if (!this.isActive || this.connectedCount === 0) return;
+
+    const seqId = this.frameId;
+    this.frameId = (this.frameId + 1) & 0xFFFF;
+
+    // Invia un pacchetto per ogni lingua
+    const sends = [...translations.entries()].map(([lang, text]) => {
+      const frame = encodeTextFrame({
+        seqId,
+        isFinal,
+        langCode: langToCode(lang), // es. 'en' → 0x656E
+        text,
+      });
+      return BLEPeripheral.sendNotification({
+        serviceUuid: GLOBOAIR_SERVICE_UUID,
+        characteristicUuid: AUDIO_CHARACTERISTIC_UUID,
+        value: uint8ToBase64(frame),
+      });
+    });
+
+    await Promise.allSettled(sends); // invia in parallelo, ignora errori singoli
   }
 
   destroy(): void {
