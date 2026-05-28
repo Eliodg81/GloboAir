@@ -118,17 +118,18 @@ class BLEPeripheralPlugin : Plugin() {
             return
         }
 
+        // PCM_16BIT è universalmente supportato (PCM_8BIT non funziona su molti dispositivi)
         val sampleRate = 8000
         val channelConfig = AudioFormat.CHANNEL_IN_MONO
-        val audioFormat = AudioFormat.ENCODING_PCM_8BIT
+        val audioFormat = AudioFormat.ENCODING_PCM_16BIT
         val bufferSize = maxOf(
             AudioRecord.getMinBufferSize(sampleRate, channelConfig, audioFormat),
-            1024
+            2048
         )
 
         try {
             audioRecord = AudioRecord(
-                MediaRecorder.AudioSource.MIC,
+                MediaRecorder.AudioSource.VOICE_COMMUNICATION,
                 sampleRate, channelConfig, audioFormat, bufferSize
             )
             if (audioRecord?.state != AudioRecord.STATE_INITIALIZED) {
@@ -140,12 +141,16 @@ class BLEPeripheralPlugin : Plugin() {
             audioRecord!!.startRecording()
 
             audioThread = Thread {
-                val buffer = ByteArray(bufferSize)
+                val buffer = ShortArray(bufferSize / 2)
                 while (isAudioCapturing) {
-                    val read = audioRecord?.read(buffer, 0, bufferSize) ?: -1
+                    val read = audioRecord?.read(buffer, 0, buffer.size) ?: -1
                     if (read > 0) {
-                        val chunk = buffer.copyOf(read)
-                        val b64 = Base64.encodeToString(chunk, Base64.NO_WRAP)
+                        // Converti PCM16 → PCM8 (scala da [-32768,32767] a [0,255])
+                        val pcm8 = ByteArray(read)
+                        for (i in 0 until read) {
+                            pcm8[i] = ((buffer[i].toInt() + 32768) shr 8).toByte()
+                        }
+                        val b64 = Base64.encodeToString(pcm8, Base64.NO_WRAP)
                         notifyListeners("audioChunk", JSObject().put("data", b64))
                     }
                 }
