@@ -71,8 +71,9 @@ export default function ReceiverView({ onBack }: Props) {
           setViewState('listening');
           // Inizializza player audio per modalità Voce diretta
           const ap = new AudioStreamPlayer();
-          ap.initialize();
-          audioPlayerRef.current = ap;
+          ap.initialize().then(() => {
+            audioPlayerRef.current = ap;
+          }).catch(e => console.warn('[AudioStreamPlayer] init error:', e));
         }
         if (s === 'idle') {
           audioPlayerRef.current?.stop();
