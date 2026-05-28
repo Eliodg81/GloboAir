@@ -1,24 +1,10 @@
 import Foundation
 import Capacitor
 import CoreBluetooth
+import AVFoundation
 
-/**
- * BLEPeripheralPlugin — iOS CoreBluetooth Peripheral Manager
- *
- * Permette al telefono del broadcaster di agire come GATT Server:
- *   - Crea il servizio GloboAir con una Audio Characteristic
- *   - Fa advertising (visibile agli scanner BLE nelle vicinanze)
- *   - Invia notifiche audio ai Central connessi
- *
- * Info.plist richiesto:
- *   NSBluetoothAlwaysUsageDescription
- *   NSBluetoothPeripheralUsageDescription
- *   UIBackgroundModes: bluetooth-peripheral
- */
 @objc(BLEPeripheralPlugin)
 public class BLEPeripheralPlugin: CAPPlugin, CBPeripheralManagerDelegate {
-
-    // MARK: - Properties
 
     private var peripheralManager: CBPeripheralManager?
     private var audioCharacteristic: CBMutableCharacteristic?
@@ -26,7 +12,67 @@ public class BLEPeripheralPlugin: CAPPlugin, CBPeripheralManagerDelegate {
     private var pendingStartCall: CAPPluginCall?
     private var serviceAdded = false
 
-    // MARK: - Plugin Methods
+    private let GLOBOAIR_SERVICE_UUID = "47410000-0000-1000-8000-00805f9b34fb"
+    private let AUDIO_CHAR_UUID       = "47410001-0000-1000-8000-00805f9b34fb"
+
+    @objc func requestMicPermission(_ call: CAPPluginCall) {
+        AVAudioSession.sharedInstance().requestRecordPermission { granted in
+            call.resolve(["granted": granted])
+        }
+    }
+
+    // Audio capture nativo iOS (AVAudioEngine)
+    private var audioEngine: AVAudioEngine? = nil
+    private var isAudioCapturing = false
+
+    @objc func startAudioCapture(_ call: CAPPluginCall) {
+        let session = AVAudioSession.sharedInstance()
+        do {
+            try session.setCategory(.playAndRecord, mode: .voiceChat, options: [.defaultToSpeaker, .allowBluetooth])
+            try session.setPreferredSampleRate(8000)
+            try session.setActive(true)
+        } catch {
+            call.reject("AVAudioSession error: \(error.localizedDescription)")
+            return
+        }
+
+        let engine = AVAudioEngine()
+        let input = engine.inputNode
+        let format = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 8000, channels: 1, interleaved: true)
+            ?? input.outputFormat(forBus: 0)
+
+        input.installTap(onBus: 0, bufferSize: 1024, format: format) { buffer, _ in
+            guard self.isAudioCapturing,
+                  let channelData = buffer.int16ChannelData else { return }
+            let frameCount = Int(buffer.frameLength)
+            var pcm8 = [UInt8](repeating: 0, count: frameCount)
+            for i in 0..<frameCount {
+                let sample = Int(channelData[0][i])
+                pcm8[i] = UInt8(max(0, min(255, (sample + 32768) >> 8)))
+            }
+            let data = Data(pcm8)
+            let b64 = data.base64EncodedString()
+            self.notifyListeners("audioChunk", data: ["data": b64])
+        }
+
+        do {
+            try engine.start()
+            self.audioEngine = engine
+            self.isAudioCapturing = true
+            call.resolve()
+        } catch {
+            call.reject("AVAudioEngine start error: \(error.localizedDescription)")
+        }
+    }
+
+    @objc func stopAudioCapture(_ call: CAPPluginCall) {
+        isAudioCapturing = false
+        audioEngine?.inputNode.removeTap(onBus: 0)
+        audioEngine?.stop()
+        audioEngine = nil
+        try? AVAudioSession.sharedInstance().setActive(false)
+        call.resolve()
+    }
 
     @objc func initialize(_ call: CAPPluginCall) {
         peripheralManager = CBPeripheralManager(delegate: self, queue: .main, options: [
@@ -37,16 +83,24 @@ public class BLEPeripheralPlugin: CAPPlugin, CBPeripheralManagerDelegate {
 
     @objc func startAdvertising(_ call: CAPPluginCall) {
         guard let pm = peripheralManager else {
-            call.reject("Not initialized")
+            call.reject("Chiama initialize() prima")
             return
         }
-
-        if pm.state != .poweredOn {
+        switch pm.state {
+        case .poweredOn:
+            _startAdvertising(call: call)
+        case .unknown, .resetting:
+            // Stato transitorio: aspetta il callback
             pendingStartCall = call
-            return
+        case .poweredOff:
+            call.reject("Bluetooth è spento — attivalo in Impostazioni")
+        case .unauthorized:
+            call.reject("Permesso Bluetooth negato — vai in Impostazioni → GloboAir → Bluetooth")
+        case .unsupported:
+            call.reject("Bluetooth non supportato su questo dispositivo")
+        @unknown default:
+            call.reject("Bluetooth non disponibile")
         }
-
-        _startAdvertising(call: call)
     }
 
     private func _startAdvertising(call: CAPPluginCall) {
@@ -55,7 +109,6 @@ public class BLEPeripheralPlugin: CAPPlugin, CBPeripheralManagerDelegate {
         let serviceUUID = CBUUID(string: GLOBOAIR_SERVICE_UUID)
         let audioCharUUID = CBUUID(string: AUDIO_CHAR_UUID)
 
-        // Crea caratteristica audio (Notify + Read)
         audioCharacteristic = CBMutableCharacteristic(
             type: audioCharUUID,
             properties: [.notify, .read],
@@ -63,7 +116,6 @@ public class BLEPeripheralPlugin: CAPPlugin, CBPeripheralManagerDelegate {
             permissions: [.readable]
         )
 
-        // Aggiungi servizio
         if !serviceAdded {
             let service = CBMutableService(type: serviceUUID, primary: true)
             service.characteristics = [audioCharacteristic!]
@@ -71,7 +123,6 @@ public class BLEPeripheralPlugin: CAPPlugin, CBPeripheralManagerDelegate {
             serviceAdded = true
         }
 
-        // Avvia advertising
         pm.startAdvertising([
             CBAdvertisementDataServiceUUIDsKey: [serviceUUID],
             CBAdvertisementDataLocalNameKey: call.getString("localName") ?? "GloboAir"
@@ -97,14 +148,7 @@ public class BLEPeripheralPlugin: CAPPlugin, CBPeripheralManagerDelegate {
             call.reject("Invalid parameters")
             return
         }
-
-        // updateValue ritorna false se la coda interna è piena → ignorare per ora
-        // In produzione: implementare coda con didIsReadyToUpdateSubscribers
         let sent = pm.updateValue(data, for: char, onSubscribedCentrals: nil)
-        if !sent {
-            // Coda piena — il pacchetto viene droppato in questa versione PoC
-            // TODO: implementare retry queue
-        }
         call.resolve(["sent": sent])
     }
 
@@ -112,20 +156,30 @@ public class BLEPeripheralPlugin: CAPPlugin, CBPeripheralManagerDelegate {
         call.resolve(["count": connectedCentrals.count])
     }
 
-    // MARK: - CBPeripheralManagerDelegate
-
     public func peripheralManagerDidUpdateState(_ peripheral: CBPeripheralManager) {
         let stateMap: [CBManagerState: String] = [
             .unknown: "unknown", .resetting: "resetting",
             .unsupported: "unsupported", .unauthorized: "unauthorized",
             .poweredOff: "poweredOff", .poweredOn: "poweredOn"
         ]
-        notifyListeners("stateChange", data: ["state": stateMap[peripheral.state] ?? "unknown"])
+        let stateStr = stateMap[peripheral.state] ?? "unknown"
+        notifyListeners("stateChange", data: ["state": stateStr])
 
-        // Se c'era una chiamata startAdvertising in attesa, eseguila ora
-        if peripheral.state == .poweredOn, let pending = pendingStartCall {
-            pendingStartCall = nil
+        guard let pending = pendingStartCall else { return }
+        pendingStartCall = nil
+
+        switch peripheral.state {
+        case .poweredOn:
             _startAdvertising(call: pending)
+        case .poweredOff:
+            pending.reject("Bluetooth è spento — attivalo in Impostazioni")
+        case .unauthorized:
+            pending.reject("Permesso Bluetooth negato — vai in Impostazioni → GloboAir → Bluetooth")
+        case .unsupported:
+            pending.reject("Bluetooth non supportato su questo dispositivo")
+        default:
+            // resetting: rimetti in attesa e riprova
+            pendingStartCall = pending
         }
     }
 
@@ -134,11 +188,7 @@ public class BLEPeripheralPlugin: CAPPlugin, CBPeripheralManagerDelegate {
                                    didSubscribeTo characteristic: CBCharacteristic) {
         let id = central.identifier.uuidString
         connectedCentrals.insert(id)
-        print("[BLEPeripheral] Central subscribed: \(id) — total: \(connectedCentrals.count)")
-        notifyListeners("centralConnected", data: [
-            "id": id,
-            "count": connectedCentrals.count
-        ])
+        notifyListeners("centralConnected", data: ["id": id, "count": connectedCentrals.count])
     }
 
     public func peripheralManager(_ peripheral: CBPeripheralManager,
@@ -146,20 +196,10 @@ public class BLEPeripheralPlugin: CAPPlugin, CBPeripheralManagerDelegate {
                                    didUnsubscribeFrom characteristic: CBCharacteristic) {
         let id = central.identifier.uuidString
         connectedCentrals.remove(id)
-        print("[BLEPeripheral] Central unsubscribed: \(id) — total: \(connectedCentrals.count)")
-        notifyListeners("centralDisconnected", data: [
-            "id": id,
-            "count": connectedCentrals.count
-        ])
+        notifyListeners("centralDisconnected", data: ["id": id, "count": connectedCentrals.count])
     }
 
     public func peripheralManagerIsReady(toUpdateSubscribers peripheral: CBPeripheralManager) {
-        // Notifica JS che la coda è libera — per implementazione retry
         notifyListeners("readyToSend", data: [:])
     }
-
-    // MARK: - Constants
-
-    private let GLOBOAIR_SERVICE_UUID = "47410000-0000-1000-8000-00805f9b34fb"
-    private let AUDIO_CHAR_UUID       = "47410001-0000-1000-8000-00805f9b34fb"
 }

@@ -14,6 +14,7 @@ def capacitor_pods
   pod 'CapacitorCommunityBluetoothLe', :path => '../../node_modules/@capacitor-community/bluetooth-le'
   pod 'CapacitorApp', :path => '../../node_modules/@capacitor/app'
   pod 'CapacitorHaptics', :path => '../../node_modules/@capacitor/haptics'
+  pod 'BLEPeripheralPlugin', :path => '../../plugins/ble-peripheral'
 end
 
 target 'App' do
