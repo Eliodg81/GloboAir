@@ -136,12 +136,18 @@ class BLEPeripheralPlugin : Plugin() {
                 .setConnectable(true)
                 .build()
 
+            // Pacchetto principale: solo Service UUID (18 byte) → iOS lo trova col filtro
             val data = AdvertiseData.Builder()
                 .addServiceUuid(ParcelUuid(SERVICE_UUID))
+                .setIncludeDeviceName(false)
+                .build()
+
+            // Scan response: nome dispositivo (non usato da iOS per il filtro, ma visibile dopo)
+            val scanResponse = AdvertiseData.Builder()
                 .setIncludeDeviceName(true)
                 .build()
 
-            advertiser?.startAdvertising(settings, data, advertiseCallback)
+            advertiser?.startAdvertising(settings, data, scanResponse, advertiseCallback)
             call.resolve()
         } catch (e: SecurityException) {
             call.reject("Permesso Bluetooth negato: ${e.message}")
