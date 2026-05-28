@@ -1,13 +1,22 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { ArrowLeft, Radio, Square, Users, Mic, Sparkles, Eye, EyeOff } from 'lucide-react';
+import { ArrowLeft, Radio, Square, Users, Mic, Sparkles, Eye, EyeOff, Zap } from 'lucide-react';
 import { BLEBroadcaster } from '../ble/BLEBroadcaster';
 import { SpeechCapture } from '../audio/SpeechCapture';
 import { OpenAITranslator } from '../audio/OpenAITranslator';
+import { GloboAirRealtimeClient } from '../audio/GloboAirRealtimeClient';
 import LanguagePicker from './LanguagePicker';
 
 interface Props { onBack: () => void; }
 
 type BroadcastState = 'idle' | 'starting' | 'live' | 'stopping' | 'error';
+
+/**
+ * Tre modalità di trasmissione:
+ *   'base'     — SpeechRecognition nativo + MyMemory (gratis per tutti)
+ *   'openai'   — SpeechRecognition nativo + gpt-4o-mini (broadcaster paga, ~$0.002/ora)
+ *   'realtime' — OpenAI Realtime Whisper STT + gpt-4o-mini (qualità massima, ~$0.06/ora)
+ */
+type TransmitMode = 'base' | 'openai' | 'realtime';
 
 export default function BroadcasterView({ onBack }: Props) {
   const [state, setState] = useState<BroadcastState>('idle');
@@ -16,36 +25,70 @@ export default function BroadcasterView({ onBack }: Props) {
   const [error, setError] = useState('');
   const [sourceLang, setSourceLang] = useState('it');
   const [liveText, setLiveText] = useState('');
+  const [realtimeStatus, setRealtimeStatus] = useState('');
 
-  // Modalità OpenAI
-  const [useOpenAI, setUseOpenAI] = useState(OpenAITranslator.hasKey('broadcaster'));
+  // Modalità
+  const [mode, setMode] = useState<TransmitMode>('base');
   const [apiKey, setApiKey] = useState(OpenAITranslator.getStoredKey('broadcaster'));
   const [showKey, setShowKey] = useState(false);
   const [showKeyInput, setShowKeyInput] = useState(false);
 
   const broadcasterRef = useRef<BLEBroadcaster | null>(null);
   const captureRef     = useRef<SpeechCapture | null>(null);
+  const realtimeRef    = useRef<GloboAirRealtimeClient | null>(null);
   const translatorRef  = useRef<OpenAITranslator | null>(null);
   const sentRef        = useRef(0);
 
   const isLive    = state === 'live';
   const hasApiKey = apiKey.startsWith('sk-');
+  const realtimeConfigured = GloboAirRealtimeClient.isConfigured();
 
   const saveApiKey = (key: string) => {
     setApiKey(key);
     OpenAITranslator.saveKey('broadcaster', key);
-    if (key.startsWith('sk-')) {
-      translatorRef.current = new OpenAITranslator(key);
-    }
   };
 
+  // ── Callback condiviso: testo trascritto → BLE ───────────────────────────
+  const handleTranscript = useCallback(async (
+    text: string,
+    isFinal: boolean,
+    broadcaster: BLEBroadcaster
+  ) => {
+    setLiveText(text);
+    if (!isFinal && text.length < 40) return;
+
+    try {
+      const useTranslation = mode === 'openai' || mode === 'realtime';
+
+      if (useTranslation && translatorRef.current && isFinal) {
+        // Broadcaster paga: traduce in ~10 lingue → ogni receiver riceve già tradotto
+        const targets = ['en', 'es', 'fr', 'de', 'zh', 'ja', 'ar', 'pt', 'ru', 'ko', 'hi', 'nl']
+          .filter(l => l !== sourceLang);
+        const translations = await translatorRef.current.translateAll(text, sourceLang, targets);
+        translations.set(sourceLang, text); // includi anche lingua originale
+        await broadcaster.sendTranslatedTexts(translations, isFinal);
+      } else {
+        // Modalità base: invia testo originale → ogni receiver traduce da solo (gratis)
+        await broadcaster.sendText(text, isFinal);
+      }
+
+      sentRef.current++;
+      setFramesSent(sentRef.current);
+    } catch (e) {
+      console.warn('[BroadcasterView] send error:', e);
+    }
+
+    if (isFinal) setTimeout(() => setLiveText(''), 1800);
+  }, [mode, sourceLang]);
+
+  // ── Avvio trasmissione ───────────────────────────────────────────────────
   const start = useCallback(async () => {
     setState('starting');
     setError('');
     sentRef.current = 0;
 
-    // Crea translator OpenAI se abilitato
-    if (useOpenAI && hasApiKey) {
+    // Crea translator se necessario
+    if ((mode === 'openai' || mode === 'realtime') && hasApiKey) {
       translatorRef.current = new OpenAITranslator(apiKey);
     }
 
@@ -56,69 +99,75 @@ export default function BroadcasterView({ onBack }: Props) {
       await broadcaster.startBroadcast();
       broadcasterRef.current = broadcaster;
 
-      const capture = new SpeechCapture(sourceLang, async (text, isFinal) => {
-        setLiveText(text);
-
-        // Invia solo le frasi finali (o parziali lunghe)
-        if (!isFinal && text.length < 40) return;
-
-        try {
-          if (useOpenAI && translatorRef.current && isFinal) {
-            // ── MODELLO BROADCASTER PAGA ─────────────────────────────────
-            // Traduci in parallelo in tutte le lingue comuni, poi invia
-            // pacchetti con tag lingua — i receiver ricevono già tradotto, gratis
-            const targetLangs = ['en', 'es', 'fr', 'de', 'zh', 'ja', 'ar', 'pt', 'ru', 'ko']
-              .filter(l => l !== sourceLang);
-            const translations = await translatorRef.current.translateAll(text, sourceLang, targetLangs);
-            // Aggiungi anche il testo originale per i receiver nella stessa lingua
-            translations.set(sourceLang, text);
-            await broadcaster.sendTranslatedTexts(translations, isFinal);
-          } else {
-            // ── MODELLO RECEIVER PAGA (o base gratuito) ───────────────────
-            // Invia il testo originale — ogni receiver traduce da solo
-            await broadcaster.sendText(text, isFinal);
+      if (mode === 'realtime') {
+        // ── MODALITÀ REALTIME: Whisper STT via WebSocket ─────────────────
+        setRealtimeStatus('Connessione al server Realtime...');
+        const rt = new GloboAirRealtimeClient(
+          sourceLang,
+          (text, isFinal) => handleTranscript(text, isFinal, broadcaster),
+          (s) => {
+            setRealtimeStatus(
+              s === 'ready'        ? 'Whisper attivo' :
+              s === 'connecting'   ? 'Connessione...' :
+              s === 'error'        ? 'Errore Realtime' :
+              s === 'disconnected' ? 'Disconnesso'    : ''
+            );
           }
+        );
+        await rt.connect();
+        realtimeRef.current = rt;
+      } else {
+        // ── MODALITÀ BASE / OPENAI: SpeechRecognition nativo ─────────────
+        const capture = new SpeechCapture(
+          sourceLang,
+          (text, isFinal) => handleTranscript(text, isFinal, broadcaster)
+        );
+        await capture.start();
+        captureRef.current = capture;
+      }
 
-          sentRef.current++;
-          setFramesSent(sentRef.current);
-        } catch (e) {
-          console.warn('[BroadcasterView] send error:', e);
-        }
-
-        if (isFinal) setTimeout(() => setLiveText(''), 1500);
-      });
-
-      await capture.start();
-      captureRef.current = capture;
       setState('live');
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Errore sconosciuto');
+      const msg = err instanceof Error ? err.message : 'Errore sconosciuto';
+      setError(msg);
       setState('error');
     }
-  }, [sourceLang, useOpenAI, hasApiKey, apiKey]);
+  }, [mode, sourceLang, hasApiKey, apiKey, handleTranscript]);
 
+  // ── Stop trasmissione ────────────────────────────────────────────────────
   const stop = useCallback(async () => {
     setState('stopping');
     captureRef.current?.stop();
+    realtimeRef.current?.disconnect();
     translatorRef.current?.destroy();
     await broadcasterRef.current?.stopBroadcast();
     broadcasterRef.current?.destroy();
     captureRef.current = null;
+    realtimeRef.current = null;
     translatorRef.current = null;
     broadcasterRef.current = null;
     setListeners(0);
     setFramesSent(0);
     setLiveText('');
+    setRealtimeStatus('');
     setState('idle');
   }, []);
 
   useEffect(() => {
     return () => {
       captureRef.current?.stop();
+      realtimeRef.current?.disconnect();
       translatorRef.current?.destroy();
       broadcasterRef.current?.stopBroadcast().catch(() => {});
     };
   }, []);
+
+  // ── Badge modalità ───────────────────────────────────────────────────────
+  const modeBadge = {
+    base:     { label: 'Base · Gratis',              color: 'text-gray-400' },
+    openai:   { label: 'AI · gpt-4o-mini',           color: 'text-purple-400' },
+    realtime: { label: 'Realtime · Whisper',         color: 'text-amber-400' },
+  }[mode];
 
   return (
     <div className="flex-1 flex flex-col bg-[#0a0a0a]">
@@ -131,7 +180,7 @@ export default function BroadcasterView({ onBack }: Props) {
         <h2 className="ml-3 text-base font-semibold text-white">Modalità Broadcast</h2>
       </div>
 
-      <div className="flex-1 flex flex-col items-center justify-between px-6 py-4 gap-4">
+      <div className="flex-1 flex flex-col items-center justify-between px-6 py-4 gap-4 overflow-y-auto">
 
         {/* Language selector */}
         <div className="w-full max-w-xs relative">
@@ -141,58 +190,66 @@ export default function BroadcasterView({ onBack }: Props) {
             onChange={setSourceLang}
             disabled={isLive}
           />
-          {isLive && (
-            <p className="text-xs text-gray-600 mt-2 text-center">
-              Lingua bloccata durante la trasmissione
-            </p>
-          )}
         </div>
 
-        {/* ── OpenAI Translation Toggle ── */}
+        {/* ── Selezione modalità (solo quando non live) ── */}
         {!isLive && (
-          <div className="w-full max-w-xs">
-            {/* Toggle card */}
-            <button
-              onClick={() => {
-                const next = !useOpenAI;
-                setUseOpenAI(next);
-                if (next && !hasApiKey) setShowKeyInput(true);
-              }}
-              className={`w-full flex items-center justify-between px-4 py-3 rounded-2xl border transition-all
-                          ${useOpenAI && hasApiKey
-                            ? 'bg-purple-500/10 border-purple-500/40'
-                            : 'bg-[#1a1a1a] border-[#2a2a2a]'}`}
-            >
-              <div className="flex items-center gap-3">
-                <Sparkles className={`w-5 h-5 ${useOpenAI && hasApiKey ? 'text-purple-400' : 'text-gray-500'}`} />
-                <div className="text-left">
-                  <p className={`text-sm font-semibold ${useOpenAI && hasApiKey ? 'text-purple-300' : 'text-gray-300'}`}>
-                    Traduzione AI (OpenAI)
-                  </p>
-                  <p className="text-xs text-gray-600">
-                    {useOpenAI && hasApiKey
-                      ? 'Pre-traduco per tutti · Receiver ricevono gratis'
-                      : 'Ogni receiver traduce da solo'}
-                  </p>
-                </div>
-              </div>
-              {/* Toggle pill */}
-              <div className={`w-11 h-6 rounded-full transition-colors relative
-                              ${useOpenAI && hasApiKey ? 'bg-purple-500' : 'bg-gray-700'}`}>
-                <div className={`absolute top-0.5 w-5 h-5 bg-white rounded-full shadow transition-transform
-                                ${useOpenAI && hasApiKey ? 'translate-x-5' : 'translate-x-0.5'}`} />
-              </div>
-            </button>
+          <div className="w-full max-w-xs flex flex-col gap-3">
+            <p className="text-[11px] font-semibold text-gray-500 uppercase tracking-widest">
+              Modalità traduzione
+            </p>
 
-            {/* API Key input */}
-            {useOpenAI && (
-              <div className="mt-2">
+            {/* BASE */}
+            <ModeCard
+              active={mode === 'base'}
+              onClick={() => setMode('base')}
+              icon={<Mic className="w-5 h-5" />}
+              title="Base"
+              subtitle="STT nativo del telefono · Ogni turista traduce da solo"
+              badge="Gratis"
+              badgeColor="text-gray-400"
+              iconColor="text-gray-400"
+            />
+
+            {/* OPENAI */}
+            <ModeCard
+              active={mode === 'openai'}
+              onClick={() => { setMode('openai'); if (!hasApiKey) setShowKeyInput(true); }}
+              icon={<Sparkles className="w-5 h-5" />}
+              title="AI Translation"
+              subtitle="STT nativo · gpt-4o-mini traduce per tutti i turisti"
+              badge="~$0.002/ora"
+              badgeColor="text-purple-400"
+              iconColor="text-purple-400"
+            />
+
+            {/* REALTIME */}
+            <ModeCard
+              active={mode === 'realtime'}
+              onClick={() => { setMode('realtime'); if (!hasApiKey) setShowKeyInput(true); }}
+              icon={<Zap className="w-5 h-5" />}
+              title="Realtime Whisper"
+              subtitle={
+                realtimeConfigured
+                  ? 'OpenAI Whisper STT + traduzione multi-lingua · Qualità massima'
+                  : 'Richiede VITE_GLOBOAIR_SUPABASE_URL in .env'
+              }
+              badge="~$0.06/ora"
+              badgeColor="text-amber-400"
+              iconColor="text-amber-400"
+              disabled={!realtimeConfigured}
+            />
+
+            {/* API Key input (per modalità openai e realtime) */}
+            {(mode === 'openai' || mode === 'realtime') && (
+              <div className="mt-1">
                 <button
                   onClick={() => setShowKeyInput(v => !v)}
-                  className="text-xs text-gray-500 hover:text-gray-300 transition-colors mb-1.5"
+                  className="text-xs text-gray-500 hover:text-gray-300 transition-colors mb-2"
                 >
-                  {showKeyInput ? '▲ Nascondi chiave API' : '▼ Imposta chiave API OpenAI'}
+                  {showKeyInput ? '▲ Nascondi chiave API' : '▼ Chiave API OpenAI'}
                 </button>
+
                 {showKeyInput && (
                   <div className="relative">
                     <input
@@ -201,8 +258,8 @@ export default function BroadcasterView({ onBack }: Props) {
                       onChange={e => saveApiKey(e.target.value)}
                       placeholder="sk-..."
                       className="w-full bg-[#111] border border-[#2a2a2a] rounded-xl px-3 py-2.5
-                                 text-white text-sm font-mono placeholder-gray-600 focus:outline-none
-                                 focus:border-purple-500/50 pr-10"
+                                 text-white text-sm font-mono placeholder-gray-600
+                                 focus:outline-none focus:border-purple-500/50 pr-10"
                     />
                     <button
                       onClick={() => setShowKey(v => !v)}
@@ -212,14 +269,15 @@ export default function BroadcasterView({ onBack }: Props) {
                     </button>
                   </div>
                 )}
-                {useOpenAI && !hasApiKey && (
+
+                {!hasApiKey && (
                   <p className="text-xs text-yellow-500/80 mt-1.5">
-                    ⚠ Inserisci la chiave API per attivare la modalità AI
+                    ⚠ Inserisci la chiave OpenAI per attivare questa modalità
                   </p>
                 )}
-                {useOpenAI && hasApiKey && (
-                  <p className="text-xs text-purple-400/70 mt-1.5">
-                    ✓ Traduco in ~10 lingue per ogni frase · ~$0.002/ora
+                {hasApiKey && (
+                  <p className="text-xs text-green-500/70 mt-1.5">
+                    ✓ Chiave API configurata
                   </p>
                 )}
               </div>
@@ -232,19 +290,26 @@ export default function BroadcasterView({ onBack }: Props) {
           <div className="relative flex items-center justify-center">
             {isLive && (
               <>
-                <div className="absolute w-52 h-52 rounded-full bg-red-500/10 animate-ping"
+                <div className={`absolute w-52 h-52 rounded-full animate-ping opacity-20
+                                ${mode === 'realtime' ? 'bg-amber-500' : mode === 'openai' ? 'bg-purple-500' : 'bg-red-500'}`}
                      style={{ animationDuration: '2s' }} />
-                <div className="absolute w-44 h-44 rounded-full bg-red-500/15 animate-ping"
+                <div className={`absolute w-44 h-44 rounded-full animate-ping opacity-15
+                                ${mode === 'realtime' ? 'bg-amber-500' : mode === 'openai' ? 'bg-purple-500' : 'bg-red-500'}`}
                      style={{ animationDuration: '1.5s', animationDelay: '0.3s' }} />
               </>
             )}
             <button
               onClick={isLive ? stop : start}
-              disabled={state === 'starting' || state === 'stopping'}
+              disabled={
+                state === 'starting' || state === 'stopping' ||
+                ((mode === 'openai' || mode === 'realtime') && !hasApiKey)
+              }
               className={`relative w-36 h-36 rounded-full flex items-center justify-center
                           shadow-2xl active:scale-95 transition-all duration-200 disabled:opacity-50
                           ${isLive
-                            ? 'bg-red-500 shadow-red-500/40 hover:bg-red-600'
+                            ? mode === 'realtime' ? 'bg-amber-500 shadow-amber-500/40'
+                              : mode === 'openai'  ? 'bg-purple-500 shadow-purple-500/40'
+                              : 'bg-red-500 shadow-red-500/40'
                             : 'bg-green-500 shadow-green-500/40 hover:bg-green-400'
                           }`}
             >
@@ -256,28 +321,35 @@ export default function BroadcasterView({ onBack }: Props) {
           </div>
 
           {/* Status */}
-          <div className="text-center min-h-[40px]">
-            {state === 'idle'     && <p className="text-gray-400">Premi per trasmettere</p>}
-            {state === 'starting' && <p className="text-yellow-400 animate-pulse">Avvio...</p>}
-            {state === 'live'     && (
+          <div className="text-center min-h-[44px]">
+            {state === 'idle' && (
+              <div>
+                <p className="text-gray-400">Premi per trasmettere</p>
+                <p className={`text-xs mt-1 ${modeBadge.color}`}>{modeBadge.label}</p>
+              </div>
+            )}
+            {state === 'starting'  && <p className="text-yellow-400 animate-pulse">Avvio...</p>}
+            {state === 'live' && (
               <div className="flex flex-col items-center gap-1">
-                <p className="text-red-400 font-semibold animate-pulse">🔴 IN ONDA</p>
-                {useOpenAI && hasApiKey && (
-                  <p className="text-purple-400 text-xs flex items-center gap-1">
-                    <Sparkles className="w-3 h-3" /> AI attiva
-                  </p>
-                )}
+                <p className={`font-semibold animate-pulse
+                              ${mode === 'realtime' ? 'text-amber-400' : mode === 'openai' ? 'text-purple-400' : 'text-red-400'}`}>
+                  🔴 IN ONDA
+                </p>
+                <p className={`text-xs ${modeBadge.color}`}>
+                  {mode === 'realtime' ? realtimeStatus || 'Realtime Whisper' : modeBadge.label}
+                </p>
               </div>
             )}
             {state === 'stopping' && <p className="text-gray-400 animate-pulse">Interruzione...</p>}
-            {state === 'error'    && <p className="text-red-400 text-sm">{error}</p>}
+            {state === 'error'    && <p className="text-red-400 text-sm text-center">{error}</p>}
           </div>
 
-          {/* Live transcription */}
+          {/* Live transcription box */}
           {isLive && (
             <div className="w-full min-h-[60px] bg-[#111] border border-[#2a2a2a] rounded-2xl px-4 py-3
                             flex items-start gap-2">
-              <Mic className="w-4 h-4 text-red-400 mt-0.5 shrink-0 animate-pulse" />
+              <Mic className={`w-4 h-4 mt-0.5 shrink-0 animate-pulse
+                              ${mode === 'realtime' ? 'text-amber-400' : 'text-red-400'}`} />
               <p className="text-gray-300 text-sm leading-relaxed">
                 {liveText || <span className="text-gray-600 italic">In ascolto...</span>}
               </p>
@@ -288,26 +360,56 @@ export default function BroadcasterView({ onBack }: Props) {
         {/* Stats */}
         {isLive ? (
           <div className="w-full max-w-xs flex gap-3">
-            <StatCard
-              icon={<Users className="w-4 h-4" />}
-              label="In ascolto"
-              value={listeners.toString()}
-              color="text-blue-400"
-            />
-            <StatCard
-              icon={<Radio className="w-4 h-4" />}
-              label="Frasi inviate"
-              value={framesSent.toString()}
-              color="text-green-400"
-            />
+            <StatCard icon={<Users className="w-4 h-4" />}
+                      label="In ascolto" value={listeners.toString()} color="text-blue-400" />
+            <StatCard icon={<Radio className="w-4 h-4" />}
+                      label="Frasi inviate" value={framesSent.toString()} color="text-green-400" />
           </div>
         ) : (
-          <p className="text-xs text-gray-600 text-center">
-            Raggio ~30m · {useOpenAI && hasApiKey ? 'Traduzione AI inclusa' : 'Nessun internet richiesto'}
-          </p>
+          <p className="text-xs text-gray-600 text-center">Raggio ~30m</p>
         )}
       </div>
     </div>
+  );
+}
+
+// ── Componenti interni ──────────────────────────────────────────────────────
+
+function ModeCard({
+  active, onClick, icon, title, subtitle, badge, badgeColor, iconColor, disabled
+}: {
+  active: boolean; onClick: () => void; icon: React.ReactNode;
+  title: string; subtitle: string; badge: string;
+  badgeColor: string; iconColor: string; disabled?: boolean;
+}) {
+  return (
+    <button
+      onClick={disabled ? undefined : onClick}
+      disabled={disabled}
+      className={`w-full flex items-start gap-3 px-4 py-3.5 rounded-2xl border text-left
+                  transition-all disabled:opacity-40
+                  ${active
+                    ? 'bg-white/5 border-white/20'
+                    : 'bg-[#1a1a1a] border-[#2a2a2a] hover:border-white/10'}`}
+    >
+      {/* Radio button */}
+      <div className={`mt-0.5 w-4 h-4 rounded-full border-2 shrink-0 flex items-center justify-center
+                      ${active ? 'border-white' : 'border-gray-600'}`}>
+        {active && <div className="w-2 h-2 rounded-full bg-white" />}
+      </div>
+
+      {/* Icon */}
+      <span className={`mt-0.5 shrink-0 ${iconColor}`}>{icon}</span>
+
+      {/* Text */}
+      <div className="flex-1 min-w-0">
+        <div className="flex items-center justify-between gap-2">
+          <p className="text-white text-sm font-semibold">{title}</p>
+          <span className={`text-[10px] font-medium shrink-0 ${badgeColor}`}>{badge}</span>
+        </div>
+        <p className="text-gray-500 text-xs mt-0.5 leading-relaxed">{subtitle}</p>
+      </div>
+    </button>
   );
 }
 

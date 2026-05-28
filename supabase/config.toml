@@ -1,0 +1,22 @@
+# GloboAir — Supabase project config
+# Questo è un progetto Supabase completamente separato da GloboUp.
+# Cambia "globoair" con il project-ref del tuo nuovo progetto Supabase.
+
+[api]
+enabled = true
+port = 54321
+schemas = []
+extra_search_path = ["public", "extensions"]
+max_rows = 1000
+
+[db]
+port = 54322
+shadow_port = 54320
+major_version = 15
+
+[studio]
+enabled = true
+port = 54323
+
+[functions.openai-realtime]
+verify_jwt = false    # la funzione è pubblica (l'API key è un secret Supabase)
