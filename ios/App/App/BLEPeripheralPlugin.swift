@@ -21,6 +21,59 @@ public class BLEPeripheralPlugin: CAPPlugin, CBPeripheralManagerDelegate {
         }
     }
 
+    // Audio capture nativo iOS (AVAudioEngine)
+    private var audioEngine: AVAudioEngine? = nil
+    private var isAudioCapturing = false
+
+    @objc func startAudioCapture(_ call: CAPPluginCall) {
+        let session = AVAudioSession.sharedInstance()
+        do {
+            try session.setCategory(.playAndRecord, mode: .voiceChat, options: [.defaultToSpeaker, .allowBluetooth])
+            try session.setPreferredSampleRate(8000)
+            try session.setActive(true)
+        } catch {
+            call.reject("AVAudioSession error: \(error.localizedDescription)")
+            return
+        }
+
+        let engine = AVAudioEngine()
+        let input = engine.inputNode
+        let format = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 8000, channels: 1, interleaved: true)
+            ?? input.outputFormat(forBus: 0)
+
+        input.installTap(onBus: 0, bufferSize: 1024, format: format) { buffer, _ in
+            guard self.isAudioCapturing,
+                  let channelData = buffer.int16ChannelData else { return }
+            let frameCount = Int(buffer.frameLength)
+            var pcm8 = [UInt8](repeating: 0, count: frameCount)
+            for i in 0..<frameCount {
+                let sample = Int(channelData[0][i])
+                pcm8[i] = UInt8(max(0, min(255, (sample + 32768) >> 8)))
+            }
+            let data = Data(pcm8)
+            let b64 = data.base64EncodedString()
+            self.notifyListeners("audioChunk", data: ["data": b64])
+        }
+
+        do {
+            try engine.start()
+            self.audioEngine = engine
+            self.isAudioCapturing = true
+            call.resolve()
+        } catch {
+            call.reject("AVAudioEngine start error: \(error.localizedDescription)")
+        }
+    }
+
+    @objc func stopAudioCapture(_ call: CAPPluginCall) {
+        isAudioCapturing = false
+        audioEngine?.inputNode.removeTap(onBus: 0)
+        audioEngine?.stop()
+        audioEngine = nil
+        try? AVAudioSession.sharedInstance().setActive(false)
+        call.resolve()
+    }
+
     @objc func initialize(_ call: CAPPluginCall) {
         peripheralManager = CBPeripheralManager(delegate: self, queue: .main, options: [
             CBPeripheralManagerOptionShowPowerAlertKey: true
