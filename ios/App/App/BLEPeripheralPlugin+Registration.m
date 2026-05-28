@@ -1,6 +1,5 @@
 #import <Capacitor/Capacitor.h>
 
-// Registra il plugin BLEPeripheral con Capacitor (Objective-C bridge)
 CAP_PLUGIN(BLEPeripheralPlugin, "BLEPeripheral",
   CAP_PLUGIN_METHOD(initialize, CAPPluginReturnPromise);
   CAP_PLUGIN_METHOD(startAdvertising, CAPPluginReturnPromise);
