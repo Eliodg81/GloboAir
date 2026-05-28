@@ -82,11 +82,9 @@ export default function ReceiverView({ onBack }: Props) {
         if (s === 'error') setViewState('error');
         if (s === 'connected') {
           setViewState('listening');
-          // Inizializza player audio per modalità Voce diretta
-          const ap = new AudioStreamPlayer();
-          ap.initialize().then(() => {
-            audioPlayerRef.current = ap;
-          }).catch(e => console.warn('[AudioStreamPlayer] init error:', e));
+          // AudioStreamPlayer già inizializzato in startScan() — NON ricreare qui
+          // (iOS blocca AudioContext creati fuori dal gesto utente)
+          console.log('[ReceiverView] connected, audioPlayer pronto:', !!audioPlayerRef.current);
         }
         if (s === 'idle') {
           audioPlayerRef.current?.stop();
@@ -97,7 +95,11 @@ export default function ReceiverView({ onBack }: Props) {
 
       // ── Pipeline audio diretto (modalità Voce) ───────────────────────────
       receiver.onFrame = (pcm8: Uint8Array) => {
-        audioPlayerRef.current?.playChunk(pcm8);
+        if (!audioPlayerRef.current) {
+          console.warn('[ReceiverView] onFrame: audioPlayer è null!');
+          return;
+        }
+        audioPlayerRef.current.playChunk(pcm8);
         setFramesReceived(r => r + 1);
       };
       receiver.onSessionFound = (session) => {
