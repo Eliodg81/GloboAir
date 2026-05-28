@@ -6,7 +6,7 @@ set -e
 cd ~/GloboAir
 
 echo "📦 npm install..."
-npm install
+npm install --legacy-peer-deps
 
 echo "🔨 Build web..."
 npm run build
