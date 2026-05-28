@@ -7,3 +7,5 @@ dist/
 .env.production
 ios/.DS_Store
 android/.DS_Store
+# ios/App/App/public/ è INCLUSO in git (aggiornato da Windows con npm run build + cap sync ios)
+
